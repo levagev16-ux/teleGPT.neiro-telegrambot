@@ -1,9 +1,6 @@
 import os
 import requests
-from flask import Flask, request, jsonify
 from groq import Groq
-
-app = Flask(__name__)
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 GROQ_API_KEY = os.environ["GROQ_API_KEY"]
@@ -16,7 +13,7 @@ MODEL = "openai/gpt-oss-120b"
 
 
 def send_message(chat_id, text):
-    r = requests.post(
+    response = requests.post(
         f"{TELEGRAM_API}/sendMessage",
         json={
             "chat_id": chat_id,
@@ -25,12 +22,10 @@ def send_message(chat_id, text):
         timeout=30
     )
 
-    print("TELEGRAM SEND:", r.status_code, r.text)
+    print("TELEGRAM:", response.status_code, response.text)
 
 
 def ask_ai(prompt):
-    print("GROQ PROMPT:", prompt)
-
     response = groq.chat.completions.create(
         model=MODEL,
         messages=[
@@ -48,47 +43,45 @@ def ask_ai(prompt):
         include_reasoning=False
     )
 
-    answer = response.choices[0].message.content
-
-    print("GROQ ANSWER:", answer)
-
-    return answer
+    return response.choices[0].message.content
 
 
-@app.route("/api/webhook", methods=["POST"])
-def webhook():
-
+def handler(request):
     print("========== WEBHOOK ==========")
 
-    update = request.get_json(silent=True)
+    if request.method != "POST":
+        return {
+            "statusCode": 200,
+            "body": "Telegram webhook is working!"
+        }
+
+    update = request.get_json()
 
     print("UPDATE:", update)
-
-    if not update:
-        return jsonify({"ok": True})
 
     message = update.get("message")
 
     if not message:
-        return jsonify({"ok": True})
+        return {
+            "statusCode": 200,
+            "body": "OK"
+        }
 
     chat = message.get("chat", {})
     chat_id = chat.get("id")
     chat_type = chat.get("type")
-
     text = message.get("text")
 
-    print("CHAT:", chat_id)
-    print("TYPE:", chat_type)
-    print("TEXT:", text)
-
     if not text:
-        return jsonify({"ok": True})
+        return {
+            "statusCode": 200,
+            "body": "OK"
+        }
 
     text = text.strip()
 
     # =========================
-    # PRIVATE CHAT
+    # ЛИЧКА
     # =========================
 
     if chat_type == "private":
@@ -101,13 +94,17 @@ def webhook():
                 chat_id,
                 "Напиши вопрос после /ask 🙂"
             )
-            return jsonify({"ok": True})
+
+            return {
+                "statusCode": 200,
+                "body": "OK"
+            }
 
         else:
             prompt = text
 
     # =========================
-    # GROUP
+    # ГРУППА
     # =========================
 
     elif chat_type in ("group", "supergroup"):
@@ -121,17 +118,17 @@ def webhook():
 
             command, separator, question = text.partition(" ")
 
-            bot_username = command[5:]
+            username = command[5:]
 
             me = requests.get(
                 f"{TELEGRAM_API}/getMe",
                 timeout=10
             ).json()
 
-            real_username = me["result"]["username"]
+            bot_username = me["result"]["username"]
 
             if (
-                bot_username.lower() == real_username.lower()
+                username.lower() == bot_username.lower()
                 and separator
             ):
                 prompt = question.strip()
@@ -143,22 +140,22 @@ def webhook():
                 "Напиши вопрос после /ask 🙂"
             )
 
-            return jsonify({"ok": True})
-
-        elif text.startswith("/ask@"):
-
-            send_message(
-                chat_id,
-                "Напиши вопрос после команды 🙂"
-            )
-
-            return jsonify({"ok": True})
+            return {
+                "statusCode": 200,
+                "body": "OK"
+            }
 
         if not prompt:
-            return jsonify({"ok": True})
+            return {
+                "statusCode": 200,
+                "body": "IGNORED"
+            }
 
     else:
-        return jsonify({"ok": True})
+        return {
+            "statusCode": 200,
+            "body": "IGNORED"
+        }
 
     # =========================
     # GROQ
@@ -177,14 +174,14 @@ def webhook():
             "❌ Ошибка Groq:\n" + str(e)[:1000]
         )
 
-        return jsonify({"ok": True})
+        return {
+            "statusCode": 200,
+            "body": "GROQ ERROR"
+        }
 
     # =========================
     # TELEGRAM
     # =========================
-
-    if not answer:
-        answer = "AI вернул пустой ответ."
 
     for i in range(0, len(answer), 4000):
 
@@ -193,4 +190,7 @@ def webhook():
             answer[i:i + 4000]
         )
 
-    return jsonify({"ok": True})
+    return {
+        "statusCode": 200,
+        "body": "OK"
+    }
