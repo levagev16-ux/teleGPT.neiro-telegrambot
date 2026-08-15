@@ -1,14 +1,7 @@
 {
-  "builds": [
-    {
-      "src": "api/webhook.py",
-      "use": "@vercel/python"
+  "functions": {
+    "api/webhook.py": {
+      "maxDuration": 60
     }
-  ],
-  "routes": [
-    {
-      "src": "/api/webhook",
-      "dest": "api/webhook.py"
-    }
-  ]
+  }
 }
