@@ -4,13 +4,14 @@ import requests
 from http.server import BaseHTTPRequestHandler
 from groq import Groq
 
+# Получение переменных окружения
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 
 TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 groq = Groq(api_key=GROQ_API_KEY)
 
-# Рабочая модель Groq
+# Модель Groq
 MODEL = "openai/gpt-oss-120b"
 
 
@@ -47,7 +48,8 @@ def ask_groq(prompt):
                 "content": prompt
             }
         ],
-        max_tokens=2048
+        max_completion_tokens=2048,
+        reasoning_effort="low"
     )
 
     return response.choices[0].message.content
@@ -137,7 +139,7 @@ class handler(BaseHTTPRequestHandler):
             self._send_ok()
             return
 
-        # --- GROQ ---
+        # --- GROQ (openai/gpt-oss-120b) ---
         try:
             print("GROQ PROMPT:", prompt)
             answer = ask_groq(prompt)
