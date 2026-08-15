@@ -1,6 +1,8 @@
 import os
+import json
 import requests
 from groq import Groq
+
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 GROQ_API_KEY = os.environ["GROQ_API_KEY"]
@@ -12,26 +14,31 @@ groq = Groq(api_key=GROQ_API_KEY)
 MODEL = "openai/gpt-oss-120b"
 
 
-def send_message(chat_id, text):
+def telegram_send(chat_id, text, reply_to=None):
+    data = {
+        "chat_id": chat_id,
+        "text": text
+    }
+
+    if reply_to:
+        data["reply_to_message_id"] = reply_to
+
     response = requests.post(
         f"{TELEGRAM_API}/sendMessage",
-        json={
-            "chat_id": chat_id,
-            "text": text
-        },
+        json=data,
         timeout=30
     )
 
     print("TELEGRAM:", response.status_code, response.text)
 
 
-def ask_ai(prompt):
+def ask_groq(prompt):
     response = groq.chat.completions.create(
         model=MODEL,
         messages=[
             {
                 "role": "system",
-                "content": "You are a helpful AI assistant."
+                "content": "You are a helpful AI assistant in Telegram. Answer clearly and naturally."
             },
             {
                 "role": "user",
@@ -47,17 +54,33 @@ def ask_ai(prompt):
 
 
 def handler(request):
-    print("========== WEBHOOK ==========")
 
+    print("========== TELEGRAM WEBHOOK ==========")
+
+    # Проверяем HTTP метод
     if request.method != "POST":
         return {
             "statusCode": 200,
             "body": "Telegram webhook is working!"
         }
 
-    update = request.get_json()
+    try:
+        update = request.get_json()
+    except Exception as e:
+        print("JSON ERROR:", repr(e))
+
+        return {
+            "statusCode": 400,
+            "body": "Invalid JSON"
+        }
 
     print("UPDATE:", update)
+
+    if not update:
+        return {
+            "statusCode": 200,
+            "body": "OK"
+        }
 
     message = update.get("message")
 
@@ -70,6 +93,8 @@ def handler(request):
     chat = message.get("chat", {})
     chat_id = chat.get("id")
     chat_type = chat.get("type")
+    message_id = message.get("message_id")
+
     text = message.get("text")
 
     if not text:
@@ -80,17 +105,25 @@ def handler(request):
 
     text = text.strip()
 
-    # =========================
-    # ЛИЧКА
-    # =========================
+    print("CHAT TYPE:", chat_type)
+    print("TEXT:", text)
+
+    prompt = None
+
+    # ==========================================
+    # ЛИЧНЫЙ ЧАТ
+    # ==========================================
 
     if chat_type == "private":
 
+        # /ask вопрос
         if text.startswith("/ask "):
             prompt = text[5:].strip()
 
+        # /ask
         elif text == "/ask":
-            send_message(
+
+            telegram_send(
                 chat_id,
                 "Напиши вопрос после /ask 🙂"
             )
@@ -100,42 +133,54 @@ def handler(request):
                 "body": "OK"
             }
 
+        # Обычный текст БЕЗ /ask
         else:
             prompt = text
 
-    # =========================
+    # ==========================================
     # ГРУППА
-    # =========================
+    # ==========================================
 
     elif chat_type in ("group", "supergroup"):
 
-        prompt = None
-
+        # /ask вопрос
         if text.startswith("/ask "):
             prompt = text[5:].strip()
 
+        # /ask@username_bot вопрос
         elif text.startswith("/ask@"):
 
             command, separator, question = text.partition(" ")
 
-            username = command[5:]
+            mentioned_username = command[5:]
 
-            me = requests.get(
-                f"{TELEGRAM_API}/getMe",
-                timeout=10
-            ).json()
+            try:
+                bot_info = requests.get(
+                    f"{TELEGRAM_API}/getMe",
+                    timeout=10
+                ).json()
 
-            bot_username = me["result"]["username"]
+                bot_username = bot_info["result"]["username"]
+
+            except Exception as e:
+                print("getMe ERROR:", repr(e))
+
+                return {
+                    "statusCode": 200,
+                    "body": "OK"
+                }
 
             if (
-                username.lower() == bot_username.lower()
+                mentioned_username.lower() == bot_username.lower()
                 and separator
+                and question.strip()
             ):
                 prompt = question.strip()
 
+        # Просто /ask
         elif text == "/ask":
 
-            send_message(
+            telegram_send(
                 chat_id,
                 "Напиши вопрос после /ask 🙂"
             )
@@ -143,6 +188,13 @@ def handler(request):
             return {
                 "statusCode": 200,
                 "body": "OK"
+            }
+
+        # Всё остальное игнорируем
+        else:
+            return {
+                "statusCode": 200,
+                "body": "IGNORED"
             }
 
         if not prompt:
@@ -151,27 +203,32 @@ def handler(request):
                 "body": "IGNORED"
             }
 
+    # Каналы и прочее игнорируем
     else:
         return {
             "statusCode": 200,
             "body": "IGNORED"
         }
 
-    # =========================
+    # ==========================================
     # GROQ
-    # =========================
+    # ==========================================
 
     try:
 
-        answer = ask_ai(prompt)
+        print("GROQ PROMPT:", prompt)
+
+        answer = ask_groq(prompt)
+
+        print("GROQ ANSWER:", answer)
 
     except Exception as e:
 
         print("GROQ ERROR:", repr(e))
 
-        send_message(
+        telegram_send(
             chat_id,
-            "❌ Ошибка Groq:\n" + str(e)[:1000]
+            "❌ Ошибка при обращении к AI:\n" + str(e)[:1000]
         )
 
         return {
@@ -179,18 +236,23 @@ def handler(request):
             "body": "GROQ ERROR"
         }
 
-    # =========================
-    # TELEGRAM
-    # =========================
+    if not answer:
+        answer = "AI вернул пустой ответ."
 
+    # ==========================================
+    # ОТПРАВКА В TELEGRAM
+    # ==========================================
+
+    # Telegram позволяет максимум около 4096 символов
     for i in range(0, len(answer), 4000):
 
-        send_message(
+        telegram_send(
             chat_id,
-            answer[i:i + 4000]
+            answer[i:i + 4000],
+            message_id
         )
 
     return {
         "statusCode": 200,
-        "body": "OK"
+        "body": json.dumps({"ok": True})
     }
