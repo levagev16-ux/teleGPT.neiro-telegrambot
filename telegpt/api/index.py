@@ -1,5 +1,6 @@
 import os
 import json
+import re
 import requests
 from http.server import BaseHTTPRequestHandler
 from groq import Groq
@@ -17,7 +18,27 @@ groq = Groq(api_key=GROQ_API_KEY)
 db = Redis(url=UPSTASH_URL, token=UPSTASH_TOKEN) if UPSTASH_URL and UPSTASH_TOKEN else None
 
 
-# ---- TELEGRAM API HELPERS ----
+# ---- TELEGRAM API & TEXT HELPERS ----
+
+def escape_markdown(text):
+    """Экранирует спецсимволы Markdown, чтобы подчёркивания и звездочки не «съедались»"""
+    if not text:
+        return ""
+    # Экранируем символы _ * ` [
+    for char in ['_', '*', '`', '[']:
+        text = text.replace(char, f"\\{char}")
+    return text
+
+
+def clean_command(text):
+    """Убирает юзернейм бота из команды (например /start@neirogpt234_bot -> /start)"""
+    if text.startswith("/"):
+        parts = text.split(maxsplit=1)
+        cmd = parts[0].split("@")[0]
+        rest = " " + parts[1] if len(parts) > 1 else ""
+        return cmd + rest
+    return text
+
 
 def telegram_request(method, payload):
     try:
@@ -341,11 +362,17 @@ class handler(BaseHTTPRequestHandler):
         chat_type = chat.get("type")
         message_id = message.get("message_id")
 
-        text = message.get("text", "").strip()
+        raw_text = message.get("text", "").strip()
+        text = clean_command(raw_text)
         voice = message.get("voice")
 
-        # КОМАНДЫ НАСТРОЙКИ МОДЕЛЕЙ
-        if text.startswith("/setmodel") or text == "/models":
+        # КОМАНДЫ ПРИВЕТСТВИЯ И НАСТРОЙКИ МОДЕЛЕЙ
+        if text.startswith("/start"):
+            telegram_send(chat_id, "👋 Привет! Я AI-помощник.\nИспользуй `/setmodel` для выбора моделей или просто отправь сообщение.", message_id)
+            self._send_ok()
+            return
+
+        if text.startswith("/setmodel") or text.startswith("/models"):
             kb = build_main_settings_keyboard(user_id)
             telegram_send(chat_id, "⚙️ *Настройки моделей AI*\n\nВыберите категорию для настройки:", reply_markup=kb)
             self._send_ok()
@@ -355,8 +382,9 @@ class handler(BaseHTTPRequestHandler):
         if voice:
             try:
                 telegram_send(chat_id, "🎙 *Распознаю голос...*", message_id)
-                text, used_voice_model = transcribe_voice(user_id, voice.get("file_id"))
-                telegram_send(chat_id, f"🗣 *Расшифровка (`{used_voice_model}`):*\n_{text}_", message_id)
+                transcribed_text, used_voice_model = transcribe_voice(user_id, voice.get("file_id"))
+                safe_trans = escape_markdown(transcribed_text)
+                telegram_send(chat_id, f"🗣 *Расшифровка (`{used_voice_model}`):*\n_{safe_trans}_", message_id)
             except Exception as e:
                 telegram_send(chat_id, f"❌ Ошибка распознавания: {e}", message_id)
                 self._send_ok()
@@ -381,34 +409,54 @@ class handler(BaseHTTPRequestHandler):
         # УПРАВЛЕНИЕ ЧАТАМИ
         if text.startswith("/newchat"):
             parts = text.split(maxsplit=1)
-            new_chat_name = parts[1].strip().replace(" ", "_") if len(parts) > 1 else f"chat_{(len(db.smembers(f'user:{user_id}:chats_list')) if db else 0) + 1}"
+            if len(parts) > 1 and parts[1].strip():
+                new_chat_name = parts[1].strip()
+            else:
+                count = len(db.smembers(f'user:{user_id}:chats_list')) if db else 0
+                new_chat_name = f"chat_{count + 1}"
+
             if db:
                 db.set(f"user:{user_id}:active_chat", new_chat_name)
                 db.sadd(f"user:{user_id}:chats_list", new_chat_name)
-            telegram_send(chat_id, f"✅ Чат переключён на: *{new_chat_name}*", message_id)
+            
+            safe_name = escape_markdown(new_chat_name)
+            telegram_send(chat_id, f"✅ Чат переключён на: *{safe_name}*", message_id)
             self._send_ok()
             return
 
-        elif text == "/chats":
+        elif text.startswith("/chats"):
             if not db:
                 telegram_send(chat_id, "База данных недоступна.", message_id)
                 self._send_ok()
                 return
             active = get_user_active_chat(user_id)
             raw_chats = db.smembers(f"user:{user_id}:chats_list")
-            chats_list = [f"👉 *{c.decode('utf-8') if isinstance(c, bytes) else c}* (активный)" if (c.decode('utf-8') if isinstance(c, bytes) else c) == active else f"🔹 {c.decode('utf-8') if isinstance(c, bytes) else c}" for c in raw_chats]
+            
+            chats_list = []
+            for c in raw_chats:
+                name = c.decode('utf-8') if isinstance(c, bytes) else str(c)
+                safe_n = escape_markdown(name)
+                if name == active:
+                    chats_list.append(f"👉 *{safe_n}* (активный)")
+                else:
+                    chats_list.append(f"🔹 {safe_n}")
+
             msg = "📋 *Ваши диалоги:*\n\n" + "\n".join(chats_list) + "\n\nПереключить: `/newchat <название>`"
             telegram_send(chat_id, msg, message_id)
             self._send_ok()
             return
 
-        elif text == "/history":
+        elif text.startswith("/history"):
             active_chat = get_user_active_chat(user_id)
             history = get_chat_history(user_id, active_chat)
+            safe_active = escape_markdown(active_chat)
             if not history:
-                telegram_send(chat_id, f"📭 История диалога *{active_chat}* пуста.", message_id)
+                telegram_send(chat_id, f"📭 История диалога *{safe_active}* пуста.", message_id)
             else:
-                formatted = [f"📜 *История диалога ({active_chat}):*"] + [f"*{'👤 Вы' if msg['role'] == 'user' else '🤖 AI'}:* {msg['content']}" for msg in history]
+                formatted = [f"📜 *История диалога ({safe_active}):*"]
+                for m in history:
+                    role_str = '👤 Вы' if m['role'] == 'user' else '🤖 AI'
+                    formatted.append(f"*{role_str}:* {m['content']}")
                 telegram_send(chat_id, "\n\n".join(formatted), message_id)
             self._send_ok()
             return
@@ -423,7 +471,9 @@ class handler(BaseHTTPRequestHandler):
                 if target_chat == active_chat:
                     db.set(f"user:{user_id}:active_chat", "chat_1")
                     db.sadd(f"user:{user_id}:chats_list", "chat_1")
-            telegram_send(chat_id, f"🗑 Диалог *{target_chat}* удалён.", message_id)
+            
+            safe_target = escape_markdown(target_chat)
+            telegram_send(chat_id, f"🗑 Диалог *{safe_target}* удалён.", message_id)
             self._send_ok()
             return
 
@@ -533,4 +583,4 @@ class handler(BaseHTTPRequestHandler):
         self.send_header('Content-type', 'application/json')
         self.end_headers()
         self.wfile.write(json.dumps({"ok": True}).encode('utf-8'))
-    
+        
