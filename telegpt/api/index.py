@@ -17,6 +17,15 @@ groq = Groq(api_key=GROQ_API_KEY)
 
 db = Redis(url=UPSTASH_URL, token=UPSTASH_TOKEN) if UPSTASH_URL and UPSTASH_TOKEN else None
 
+# Получаем юзернейм бота при запуске (или задайте вручную)
+BOT_USERNAME = None
+try:
+    bot_info = requests.get(f"{TELEGRAM_API}/getMe").json()
+    if bot_info.get("ok"):
+        BOT_USERNAME = bot_info["result"]["username"].lower()
+except Exception:
+    BOT_USERNAME = "neirogpt234_bot"
+
 
 # ---- TELEGRAM API & TEXT HELPERS ----
 
@@ -24,7 +33,6 @@ def escape_markdown(text):
     """Экранирует спецсимволы Markdown, чтобы подчёркивания и звездочки не «съедались»"""
     if not text:
         return ""
-    # Экранируем символы _ * ` [
     for char in ['_', '*', '`', '[']:
         text = text.replace(char, f"\\{char}")
     return text
@@ -207,7 +215,6 @@ def build_category_keyboard(user_id, category_type):
 # ---- AI LOGIC & SYSTEM PROMPTS ----
 
 def get_system_prompt_for_model(model_name):
-    """Динамический системный промпт для корректной самоидентификации"""
     m_lower = model_name.lower()
 
     if "gemma" in m_lower:
@@ -477,12 +484,28 @@ class handler(BaseHTTPRequestHandler):
             self._send_ok()
             return
 
-        # ИЗВЛЕЧЕНИЕ ТЕКСТА ЗАПРОСА
+        # ИЗВЛЕЧЕНИЕ ТЕКСТА ЗАПРОСА В ЛИЧНЫХ СООБЩЕНИЯХ И ГРУППАХ
         prompt = None
+
         if chat_type == "private":
             prompt = text[5:].strip() if text.startswith("/ask ") else text
-        elif chat_type in ("group", "supergroup") and text.startswith("/ask "):
-            prompt = text[5:].strip()
+        elif chat_type in ("group", "supergroup"):
+            # Проверяем условия для группы:
+            is_reply_to_bot = False
+            reply_msg = message.get("reply_to_message")
+            if reply_msg and reply_msg.get("from", {}).get("is_bot"):
+                is_reply_to_bot = True
+
+            bot_mentioned = BOT_USERNAME and f"@{BOT_USERNAME}" in raw_text.lower()
+
+            if text.startswith("/ask "):
+                prompt = text[5:].strip()
+            elif bot_mentioned:
+                # Удаляем из текста юзернейм бота
+                clean_txt = re.sub(f"@{BOT_USERNAME}", "", raw_text, flags=re.IGNORECASE).strip()
+                prompt = clean_txt
+            elif is_reply_to_bot:
+                prompt = raw_text.strip()
 
         if not prompt:
             self._send_ok()
@@ -495,7 +518,7 @@ class handler(BaseHTTPRequestHandler):
         try:
             answer, used_model, is_fallback = ask_groq_with_fallback(user_id, history, prompt)
         except Exception as e:
-            telegram_send(chat_id, f"❌ Ошибка Groq AI:\n{str(e)[:1000]}")
+            telegram_send(chat_id, f"❌ Ошибка Groq AI:\n{str(e)[:1000]}", message_id)
             self._send_ok()
             return
 
@@ -583,4 +606,3 @@ class handler(BaseHTTPRequestHandler):
         self.send_header('Content-type', 'application/json')
         self.end_headers()
         self.wfile.write(json.dumps({"ok": True}).encode('utf-8'))
-        
