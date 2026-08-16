@@ -13,13 +13,13 @@ UPSTASH_URL = os.environ.get("KV_REST_API_URL")
 UPSTASH_TOKEN = os.environ.get("KV_REST_API_TOKEN")
 
 TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
-groq = Groq(api_key=GROQ_API_KEY)
+groq = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 
 db = Redis(url=UPSTASH_URL, token=UPSTASH_TOKEN) if UPSTASH_URL and UPSTASH_TOKEN else None
 
 BOT_USERNAME = None
 try:
-    bot_info = requests.get(f"{TELEGRAM_API}/getMe").json()
+    bot_info = requests.get(f"{TELEGRAM_API}/getMe", timeout=10).json()
     if bot_info.get("ok"):
         BOT_USERNAME = bot_info["result"]["username"].lower()
 except Exception:
@@ -32,7 +32,7 @@ def escape_markdown(text):
     if not text:
         return ""
     for char in ['_', '*', '`', '[']:
-        text = text.replace(char, f"\\{char}")
+        text = str(text).replace(char, f"\\{char}")
     return text
 
 
@@ -91,13 +91,15 @@ def get_telegram_file_url(file_id):
 
 def fetch_all_groq_models():
     try:
+        if not groq:
+            raise Exception("Groq API client не инициализирован.")
         models_data = groq.models.list()
         return [m.id for m in models_data.data]
     except Exception as e:
         print(f"Ошибка получения моделей: {e}")
         return [
-            "openai/gpt-oss-120b", "openai/gpt-oss-20b",
             "llama-3.3-70b-versatile", "llama-3.1-8b-instant",
+            "openai/gpt-oss-120b", "openai/gpt-oss-20b",
             "whisper-large-v3-turbo", "whisper-large-v3",
             "openai/gpt-oss-safeguard-20b"
         ]
@@ -110,6 +112,8 @@ def get_categorized_models():
     voice_models = [m for m in all_models if "whisper" in m]
     mod_models = [m for m in all_models if any(x in m for x in ["safeguard", "prompt-guard"])]
 
+    if not text_models:
+        text_models = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
     if not voice_models:
         voice_models = ["whisper-large-v3-turbo", "whisper-large-v3"]
     if not mod_models:
@@ -120,101 +124,122 @@ def get_categorized_models():
 
 # ---- DATABASE SETTINGS & CHAT MANAGEMENT ----
 
+def decode_val(val):
+    if val is None:
+        return ""
+    if isinstance(val, bytes):
+        return val.decode('utf-8')
+    return str(val)
+
+
 def get_user_setting(user_id, key, default="auto"):
     if not db:
         return default
-    val = db.get(f"user:{user_id}:{key}")
-    if not val:
+    try:
+        val = db.get(f"user:{user_id}:{key}")
+        if not val:
+            return default
+        return decode_val(val)
+    except Exception as e:
+        print(f"DB Error (get_user_setting): {e}")
         return default
-    return val if isinstance(val, str) else val.decode('utf-8')
 
 
 def set_user_setting(user_id, key, value):
     if db:
-        db.set(f"user:{user_id}:{key}", value)
+        try:
+            db.set(f"user:{user_id}:{key}", value)
+        except Exception as e:
+            print(f"DB Error (set_user_setting): {e}")
 
 
 def get_user_active_chat(user_id):
     if not db:
         return "chat_1"
-    active = db.get(f"user:{user_id}:active_chat")
-    if not active:
-        active = "chat_1"
-        db.set(f"user:{user_id}:active_chat", active)
-        db.sadd(f"user:{user_id}:chats_list", active)
-    return active if isinstance(active, str) else active.decode('utf-8')
+    try:
+        active = db.get(f"user:{user_id}:active_chat")
+        if not active:
+            active = "chat_1"
+            db.set(f"user:{user_id}:active_chat", active)
+            db.sadd(f"user:{user_id}:chats_list", active)
+        return decode_val(active)
+    except Exception as e:
+        print(f"DB Error (get_user_active_chat): {e}")
+        return "chat_1"
 
 
 def get_user_chats_list(user_id):
     if not db:
         return ["chat_1"]
-    raw_chats = db.smembers(f"user:{user_id}:chats_list")
-    if not raw_chats:
-        db.sadd(f"user:{user_id}:chats_list", "chat_1")
+    try:
+        raw_chats = db.smembers(f"user:{user_id}:chats_list")
+        if not raw_chats:
+            db.sadd(f"user:{user_id}:chats_list", "chat_1")
+            return ["chat_1"]
+        return [decode_val(c) for c in raw_chats]
+    except Exception as e:
+        print(f"DB Error (get_user_chats_list): {e}")
         return ["chat_1"]
-    return [c.decode('utf-8') if isinstance(c, bytes) else str(c) for c in raw_chats]
 
 
 def get_chat_history(user_id, chat_name):
     if not db:
         return []
-    history = db.get(f"user:{user_id}:chat:{chat_name}")
-    if not history:
-        return []
-    if isinstance(history, bytes):
-        history = history.decode('utf-8')
     try:
-        return json.loads(history)
-    except Exception:
+        history = db.get(f"user:{user_id}:chat:{chat_name}")
+        if not history:
+            return []
+        history_str = decode_val(history)
+        return json.loads(history_str)
+    except Exception as e:
+        print(f"DB Error (get_chat_history): {e}")
         return []
 
 
 def save_chat_history(user_id, chat_name, history):
     if db:
-        db.set(f"user:{user_id}:chat:{chat_name}", json.dumps(history[-10:]))
+        try:
+            db.set(f"user:{user_id}:chat:{chat_name}", json.dumps(history[-10:]))
+        except Exception as e:
+            print(f"DB Error (save_chat_history): {e}")
 
 
 def purge_chat_data(user_id, chat_name):
-    """Полное удаление конкретного чата из базы"""
     if not db:
         return
-    db.delete(f"user:{user_id}:chat:{chat_name}")
-    db.srem(f"user:{user_id}:chats_list", chat_name)
-    
-    active = get_user_active_chat(user_id)
-    if active == chat_name:
-        remaining = get_user_chats_list(user_id)
-        new_active = remaining[0] if remaining else "chat_1"
-        db.set(f"user:{user_id}:active_chat", new_active)
-        db.sadd(f"user:{user_id}:chats_list", new_active)
+    try:
+        db.delete(f"user:{user_id}:chat:{chat_name}")
+        db.srem(f"user:{user_id}:chats_list", chat_name)
+
+        active = get_user_active_chat(user_id)
+        if active == chat_name:
+            remaining = get_user_chats_list(user_id)
+            new_active = remaining[0] if remaining else "chat_1"
+            db.set(f"user:{user_id}:active_chat", new_active)
+            db.sadd(f"user:{user_id}:chats_list", new_active)
+    except Exception as e:
+        print(f"DB Error (purge_chat_data): {e}")
 
 
 def cleanup_orphan_chats(user_id):
-    """Сканирует базу данных и удаляет все устаревшие/заброшенные ключи чатов пользователя"""
     if not db:
         return 0
 
-    valid_chats = set(get_user_chats_list(user_id))
-    pattern = f"user:{user_id}:chat:*"
     deleted_count = 0
-
     try:
-        # Получаем список всех ключей чатов данного пользователя
-        keys = db.keys(pattern)
+        valid_chats = set(get_user_chats_list(user_id))
+        keys = db.keys(f"user:{user_id}:chat:*")
         if not keys:
             return 0
 
         for key in keys:
-            key_str = key.decode('utf-8') if isinstance(key, bytes) else str(key)
-            # Извлекаем имя чата из формата user:{id}:chat:{chat_name}
+            key_str = decode_val(key)
             chat_name = key_str.replace(f"user:{user_id}:chat:", "")
-            
-            # Если этого чата нет в списке активных/сохранённых чатов — удаляем
             if chat_name not in valid_chats:
                 db.delete(key_str)
                 deleted_count += 1
     except Exception as e:
-        print(f"Ошибка при очистке заброшенных ключей: {e}")
+        print(f"Ошибка при очистке ключей: {e}")
 
     return deleted_count
 
@@ -226,7 +251,6 @@ def build_chats_menu_keyboard(user_id):
     chats = get_user_chats_list(user_id)
 
     buttons = []
-    
     for c in chats:
         prefix = "👉 " if c == active else "💬 "
         buttons.append([{"text": f"{prefix}{c}", "callback_data": f"switch_chat_{c}"}])
@@ -317,10 +341,8 @@ def get_system_prompt_for_model(model_name):
         name, creator = model_name, "Groq"
 
     return (
-        f"Ты — виртуальный помощник {name}, созданный компанией {creator}. "
-        f"Твоя задача — отвечать на вопросы пользователей и помогать в самых разных задачах. "
-        f"Если тебя спрашивают кто ты, ты должен строго отвечать: "
-        f"«Я — виртуальный помощник {name}, созданный компанией {creator}. Моя задача — отвечать на ваши вопросы и помогать в самых разных задачах. Чем могу быть полезен?»"
+        f"Ты — полезный ассистент {name}, созданный разработчиками {creator}. "
+        f"Отвечай пользователю прямо, грамотно и точно по сути его вопроса."
     )
 
 
@@ -376,28 +398,18 @@ def ask_groq_with_fallback(user_id, history, prompt):
     selected_model = get_user_setting(user_id, "model_text", "auto")
     text_models, _, _ = get_categorized_models()
 
-    target_model = selected_model if selected_model != "auto" else (text_models[0] if text_models else "llama-3.3-70b-versatile")
-    system_instruction = get_system_prompt_for_model(target_model)
-
-    messages = [{"role": "system", "content": system_instruction}]
-    for msg in history:
-        messages.append({"role": msg["role"], "content": msg["content"]})
-    messages.append({"role": "user", "content": prompt})
-
-    if selected_model != "auto":
-        response = groq.chat.completions.create(
-            model=selected_model,
-            messages=messages,
-            max_completion_tokens=2048,
-            reasoning_effort="low" if "gpt-oss" in selected_model else None
-        )
-        return response.choices[0].message.content, selected_model, False
+    models_to_try = [selected_model] if selected_model != "auto" else text_models
 
     last_error = None
-    for model_name in text_models:
+    for model_name in models_to_try:
         try:
-            current_system = get_system_prompt_for_model(model_name)
-            messages[0] = {"role": "system", "content": current_system}
+            system_instruction = get_system_prompt_for_model(model_name)
+            messages = [{"role": "system", "content": system_instruction}]
+
+            for msg in history:
+                messages.append({"role": msg["role"], "content": msg["content"]})
+
+            messages.append({"role": "user", "content": prompt})
 
             response = groq.chat.completions.create(
                 model=model_name,
@@ -405,9 +417,10 @@ def ask_groq_with_fallback(user_id, history, prompt):
                 max_completion_tokens=2048,
                 reasoning_effort="low" if "gpt-oss" in model_name else None
             )
+
             answer = response.choices[0].message.content
             if answer:
-                is_fallback = (model_name != text_models[0])
+                is_fallback = (selected_model == "auto" and model_name != text_models[0])
                 return answer, model_name, is_fallback
         except Exception as e:
             last_error = e
@@ -433,7 +446,10 @@ class handler(BaseHTTPRequestHandler):
         # 1. ОБРАБОТКА ИНТЕРАКТИВНЫХ КНОПОК
         callback_query = update.get("callback_query")
         if callback_query:
-            self._handle_callback(callback_query)
+            try:
+                self._handle_callback(callback_query)
+            except Exception as e:
+                print(f"Callback error: {e}")
             self._send_ok()
             return
 
@@ -453,7 +469,7 @@ class handler(BaseHTTPRequestHandler):
         text = clean_command(raw_text)
         voice = message.get("voice")
 
-        # КОМАНДЫ ПРИВЕТСТВИЯ И НАСТРОЙКИ
+        # КОМАНДЫ
         if text.startswith("/start"):
             telegram_send(chat_id, "👋 Привет! Я AI-помощник.\n\nИспользуй `/chats` для управления диалогами или `/setmodel` для выбора моделей.", message_id)
             self._send_ok()
@@ -508,8 +524,11 @@ class handler(BaseHTTPRequestHandler):
                 parts = text.split(maxsplit=1)
                 new_chat_name = parts[1].strip() if len(parts) > 1 and parts[1].strip() else f"chat_{len(get_user_chats_list(user_id)) + 1}"
                 if db:
-                    db.set(f"user:{user_id}:active_chat", new_chat_name)
-                    db.sadd(f"user:{user_id}:chats_list", new_chat_name)
+                    try:
+                        db.set(f"user:{user_id}:active_chat", new_chat_name)
+                        db.sadd(f"user:{user_id}:chats_list", new_chat_name)
+                    except Exception as e:
+                        print(f"DB error /newchat: {e}")
                 telegram_send(chat_id, f"✅ Создан и переключён чат: *{escape_markdown(new_chat_name)}*", message_id)
                 self._send_ok()
                 return
@@ -580,7 +599,10 @@ class handler(BaseHTTPRequestHandler):
         elif data.startswith("switch_chat_"):
             target_chat = data[12:]
             if db:
-                db.set(f"user:{user_id}:active_chat", target_chat)
+                try:
+                    db.set(f"user:{user_id}:active_chat", target_chat)
+                except Exception as e:
+                    print(f"DB Error switch_chat: {e}")
             telegram_answer_callback(cb_id, f"Переключено на: {target_chat}")
             kb = build_chats_menu_keyboard(user_id)
             telegram_edit_message(chat_id, message_id, f"📋 *Управление диалогами*\n\nТекущий активный чат: *{escape_markdown(target_chat)}*", reply_markup=kb)
@@ -589,8 +611,11 @@ class handler(BaseHTTPRequestHandler):
             count = len(get_user_chats_list(user_id)) + 1
             new_name = f"chat_{count}"
             if db:
-                db.set(f"user:{user_id}:active_chat", new_name)
-                db.sadd(f"user:{user_id}:chats_list", new_name)
+                try:
+                    db.set(f"user:{user_id}:active_chat", new_name)
+                    db.sadd(f"user:{user_id}:chats_list", new_name)
+                except Exception as e:
+                    print(f"DB Error action_new_chat: {e}")
             telegram_answer_callback(cb_id, f"Создан чат: {new_name}")
             kb = build_chats_menu_keyboard(user_id)
             telegram_edit_message(chat_id, message_id, f"✅ Создан и выбран новый чат: *{escape_markdown(new_name)}*\n\nИли напишите `/newchat <имя>`, чтобы дать своё название.", reply_markup=kb)
@@ -690,4 +715,4 @@ class handler(BaseHTTPRequestHandler):
         self.send_header('Content-type', 'application/json')
         self.end_headers()
         self.wfile.write(json.dumps({"ok": True}).encode('utf-8'))
-    
+        
