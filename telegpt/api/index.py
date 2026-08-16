@@ -60,7 +60,7 @@ def telegram_send(chat_id, text, reply_to=None, reply_markup=None):
         data["reply_to_message_id"] = reply_to
     if reply_markup:
         data["reply_markup"] = reply_markup
-    telegram_request("sendMessage", data)
+    return telegram_request("sendMessage", data)
 
 
 def telegram_edit_message(chat_id, message_id, text, reply_markup=None):
@@ -72,7 +72,7 @@ def telegram_edit_message(chat_id, message_id, text, reply_markup=None):
     }
     if reply_markup:
         data["reply_markup"] = reply_markup
-    telegram_request("editMessageText", data)
+    return telegram_request("editMessageText", data)
 
 
 def telegram_answer_callback(callback_query_id, text=""):
@@ -176,7 +176,9 @@ def get_user_chats_list(user_id):
         if not raw_chats:
             db.sadd(f"user:{user_id}:chats_list", "chat_1")
             return ["chat_1"]
-        return [decode_val(c) for c in raw_chats]
+        chats = [decode_val(c) for c in raw_chats]
+        chats.sort()
+        return chats
     except Exception as e:
         print(f"DB Error (get_user_chats_list): {e}")
         return ["chat_1"]
@@ -244,17 +246,39 @@ def cleanup_orphan_chats(user_id):
     return deleted_count
 
 
-# ---- KEYBOARD BUILDERS ----
+# ---- KEYBOARD BUILDERS WITH PAGINATION ----
 
-def build_chats_menu_keyboard(user_id):
+ITEMS_PER_PAGE = 5
+
+def build_chats_menu_keyboard(user_id, page=1):
     active = get_user_active_chat(user_id)
-    chats = get_user_chats_list(user_id)
+    all_chats = get_user_chats_list(user_id)
+
+    total_chats = len(all_chats)
+    total_pages = max(1, (total_chats + ITEMS_PER_PAGE - 1) // ITEMS_PER_PAGE)
+    page = max(1, min(page, total_pages))
+
+    start_idx = (page - 1) * ITEMS_PER_PAGE
+    end_idx = start_idx + ITEMS_PER_PAGE
+    current_page_chats = all_chats[start_idx:end_idx]
 
     buttons = []
-    for c in chats:
+    
+    # Список чатов
+    for c in current_page_chats:
         prefix = "👉 " if c == active else "💬 "
-        buttons.append([{"text": f"{prefix}{c}", "callback_data": f"switch_chat_{c}"}])
+        buttons.append([{"text": f"{prefix}{c}", "callback_data": f"sw_ch_{c}_{page}"}])
 
+    # Навигация пагинации
+    nav_row = []
+    if page > 1:
+        nav_row.append({"text": "⬅️ Назад", "callback_data": f"chats_p_{page - 1}"})
+    nav_row.append({"text": f"📄 {page}/{total_pages}", "callback_data": "noop"})
+    if page < total_pages:
+        nav_row.append({"text": "Вперёд ➡️", "callback_data": f"chats_p_{page + 1}"})
+    buttons.append(nav_row)
+
+    # Функциональные кнопки
     buttons.append([{"text": "➕ Новый чат", "callback_data": "action_new_chat"}])
     buttons.append([
         {"text": "📜 История", "callback_data": "action_view_history"},
@@ -271,7 +295,7 @@ def build_delete_confirm_keyboard(chat_name):
         "inline_keyboard": [
             [
                 {"text": "✅ Да, удалить", "callback_data": f"do_del_{chat_name}"},
-                {"text": "❌ Отмена", "callback_data": "chats_menu"}
+                {"text": "❌ Отмена", "callback_data": "chats_p_1"}
             ]
         ]
     }
@@ -469,9 +493,20 @@ class handler(BaseHTTPRequestHandler):
         text = clean_command(raw_text)
         voice = message.get("voice")
 
-        # КОМАНДЫ
-        if text.startswith("/start"):
-            telegram_send(chat_id, "👋 Привет! Я AI-помощник.\n\nИспользуй `/chats` для управления диалогами или `/setmodel` для выбора моделей.", message_id)
+        # ОСНОВНЫЕ И ДОПОЛНИТЕЛЬНЫЕ КОМАНДЫ БОТА
+        if text.startswith("/start") or text.startswith("/help"):
+            help_msg = (
+                "👋 *Привет! Я мультимодальный AI-помощник.*\n\n"
+                "📌 *Основные команды:*\n"
+                "• `/chats` — Управление диалогами (создание, переключение, удаление)\n"
+                "• `/setmodel` или `/models` — Настройки моделей AI\n"
+                "• `/newchat <имя>` — Быстро создать и выбрать новый чат\n"
+                "• `/clear` — Очистить историю текущего чата\n"
+                "• `/info` или `/status` — Информация о боте и активной модели\n"
+                "• `/moderation <текст>` — Проверить текст моделью модерации\n\n"
+                "💬 Просто напишите сообщение, чтобы начать диалог!"
+            )
+            telegram_send(chat_id, help_msg, message_id)
             self._send_ok()
             return
 
@@ -482,9 +517,36 @@ class handler(BaseHTTPRequestHandler):
             return
 
         if text.startswith("/chats"):
-            kb = build_chats_menu_keyboard(user_id)
+            kb = build_chats_menu_keyboard(user_id, page=1)
             active = escape_markdown(get_user_active_chat(user_id))
             telegram_send(chat_id, f"📋 *Управление диалогами*\n\nТекущий активный чат: *{active}*", reply_markup=kb)
+            self._send_ok()
+            return
+
+        if text.startswith("/clear"):
+            active = get_user_active_chat(user_id)
+            if db:
+                db.delete(f"user:{user_id}:chat:{active}")
+            telegram_send(chat_id, f"🧹 История чата *{escape_markdown(active)}* очищена!", message_id)
+            self._send_ok()
+            return
+
+        if text.startswith("/info") or text.startswith("/status"):
+            active = get_user_active_chat(user_id)
+            txt_m = get_user_setting(user_id, "model_text", "auto")
+            voc_m = get_user_setting(user_id, "model_voice", "auto")
+            mod_m = get_user_setting(user_id, "model_mod", "auto")
+            chats_cnt = len(get_user_chats_list(user_id))
+
+            info_text = (
+                f"📊 *Статус и информация:*\n\n"
+                f"• *Активный чат:* `{escape_markdown(active)}`\n"
+                f"• *Всего чатов:* `{chats_cnt}`\n"
+                f"• *Модель текста:* `{txt_m}`\n"
+                f"• *Модель голоса:* `{voc_m}`\n"
+                f"• *Модель модерации:* `{mod_m}`"
+            )
+            telegram_send(chat_id, info_text, message_id)
             self._send_ok()
             return
 
@@ -516,7 +578,7 @@ class handler(BaseHTTPRequestHandler):
             self._send_ok()
             return
 
-        # ИЗВЛЕЧЕНИЕ ТЕКСТА ЗАПРОСА В ЛИЧНЫХ СООБЩЕНИЯХ И ГРУППАХ
+        # ИЗВЛЕЧЕНИЕ ТЕКСТА ЗАПРОСА
         prompt = None
 
         if chat_type == "private":
@@ -590,21 +652,30 @@ class handler(BaseHTTPRequestHandler):
         message_id = msg.get("message_id")
         user_id = cb.get("from", {}).get("id", chat_id)
 
-        # МЕНЮ ЧАТОВ
-        if data == "chats_menu":
-            kb = build_chats_menu_keyboard(user_id)
+        if data == "noop":
+            telegram_answer_callback(cb_id)
+            return
+
+        # ПАГИНАЦИЯ И МЕНЮ ЧАТОВ
+        if data.startswith("chats_p_"):
+            page = int(data.split("_")[2])
+            kb = build_chats_menu_keyboard(user_id, page=page)
             active = escape_markdown(get_user_active_chat(user_id))
             telegram_edit_message(chat_id, message_id, f"📋 *Управление диалогами*\n\nТекущий активный чат: *{active}*", reply_markup=kb)
 
-        elif data.startswith("switch_chat_"):
-            target_chat = data[12:]
+        elif data.startswith("sw_ch_"):
+            parts = data.split("_")
+            target_chat = parts[2]
+            page = int(parts[3]) if len(parts) > 3 else 1
+
             if db:
                 try:
                     db.set(f"user:{user_id}:active_chat", target_chat)
                 except Exception as e:
                     print(f"DB Error switch_chat: {e}")
+
             telegram_answer_callback(cb_id, f"Переключено на: {target_chat}")
-            kb = build_chats_menu_keyboard(user_id)
+            kb = build_chats_menu_keyboard(user_id, page=page)
             telegram_edit_message(chat_id, message_id, f"📋 *Управление диалогами*\n\nТекущий активный чат: *{escape_markdown(target_chat)}*", reply_markup=kb)
 
         elif data == "action_new_chat":
@@ -617,7 +688,7 @@ class handler(BaseHTTPRequestHandler):
                 except Exception as e:
                     print(f"DB Error action_new_chat: {e}")
             telegram_answer_callback(cb_id, f"Создан чат: {new_name}")
-            kb = build_chats_menu_keyboard(user_id)
+            kb = build_chats_menu_keyboard(user_id, page=1)
             telegram_edit_message(chat_id, message_id, f"✅ Создан и выбран новый чат: *{escape_markdown(new_name)}*\n\nИли напишите `/newchat <имя>`, чтобы дать своё название.", reply_markup=kb)
 
         elif data.startswith("confirm_del_"):
@@ -629,14 +700,14 @@ class handler(BaseHTTPRequestHandler):
             target_chat = data[7:]
             purge_chat_data(user_id, target_chat)
             telegram_answer_callback(cb_id, f"Чат {target_chat} удалён!")
-            kb = build_chats_menu_keyboard(user_id)
+            kb = build_chats_menu_keyboard(user_id, page=1)
             active = escape_markdown(get_user_active_chat(user_id))
             telegram_edit_message(chat_id, message_id, f"🗑 Чат *{escape_markdown(target_chat)}* успешно удалён.\n\nТекущий активный чат: *{active}*", reply_markup=kb)
 
         elif data == "action_clean_orphans":
             deleted_count = cleanup_orphan_chats(user_id)
             telegram_answer_callback(cb_id, f"Очищено {deleted_count} устаревших ключей!")
-            kb = build_chats_menu_keyboard(user_id)
+            kb = build_chats_menu_keyboard(user_id, page=1)
             active = escape_markdown(get_user_active_chat(user_id))
             telegram_edit_message(chat_id, message_id, f"🧹 Сканирование завершено!\nУдалено устаревших ключей из базы: *{deleted_count}*\n\nТекущий активный чат: *{active}*", reply_markup=kb)
 
@@ -715,4 +786,4 @@ class handler(BaseHTTPRequestHandler):
         self.send_header('Content-type', 'application/json')
         self.end_headers()
         self.wfile.write(json.dumps({"ok": True}).encode('utf-8'))
-        
+    
