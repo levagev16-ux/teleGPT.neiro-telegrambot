@@ -48,7 +48,7 @@ def ask_groq(prompt):
                 "content": prompt
             }
         ],
-        max_completion_tokens=3072,
+        max_completion_tokens=512,
         reasoning_effort="low"
     )
 
