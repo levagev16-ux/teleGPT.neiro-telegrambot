@@ -17,7 +17,6 @@ groq = Groq(api_key=GROQ_API_KEY)
 
 db = Redis(url=UPSTASH_URL, token=UPSTASH_TOKEN) if UPSTASH_URL and UPSTASH_TOKEN else None
 
-# Получаем юзернейм бота при запуске (или задайте вручную)
 BOT_USERNAME = None
 try:
     bot_info = requests.get(f"{TELEGRAM_API}/getMe").json()
@@ -30,7 +29,6 @@ except Exception:
 # ---- TELEGRAM API & TEXT HELPERS ----
 
 def escape_markdown(text):
-    """Экранирует спецсимволы Markdown, чтобы подчёркивания и звездочки не «съедались»"""
     if not text:
         return ""
     for char in ['_', '*', '`', '[']:
@@ -39,7 +37,6 @@ def escape_markdown(text):
 
 
 def clean_command(text):
-    """Убирает юзернейм бота из команды (например /start@neirogpt234_bot -> /start)"""
     if text.startswith("/"):
         parts = text.split(maxsplit=1)
         cmd = parts[0].split("@")[0]
@@ -121,7 +118,7 @@ def get_categorized_models():
     return text_models, voice_models, mod_models
 
 
-# ---- DATABASE SETTINGS HELPERS ----
+# ---- DATABASE SETTINGS & CHAT MANAGEMENT ----
 
 def get_user_setting(user_id, key, default="auto"):
     if not db:
@@ -148,6 +145,16 @@ def get_user_active_chat(user_id):
     return active if isinstance(active, str) else active.decode('utf-8')
 
 
+def get_user_chats_list(user_id):
+    if not db:
+        return ["chat_1"]
+    raw_chats = db.smembers(f"user:{user_id}:chats_list")
+    if not raw_chats:
+        db.sadd(f"user:{user_id}:chats_list", "chat_1")
+        return ["chat_1"]
+    return [c.decode('utf-8') if isinstance(c, bytes) else str(c) for c in raw_chats]
+
+
 def get_chat_history(user_id, chat_name):
     if not db:
         return []
@@ -156,7 +163,10 @@ def get_chat_history(user_id, chat_name):
         return []
     if isinstance(history, bytes):
         history = history.decode('utf-8')
-    return json.loads(history)
+    try:
+        return json.loads(history)
+    except Exception:
+        return []
 
 
 def save_chat_history(user_id, chat_name, history):
@@ -164,7 +174,84 @@ def save_chat_history(user_id, chat_name, history):
         db.set(f"user:{user_id}:chat:{chat_name}", json.dumps(history[-10:]))
 
 
-# ---- MENU KEYBOARDS ----
+def purge_chat_data(user_id, chat_name):
+    """Полное удаление конкретного чата из базы"""
+    if not db:
+        return
+    db.delete(f"user:{user_id}:chat:{chat_name}")
+    db.srem(f"user:{user_id}:chats_list", chat_name)
+    
+    active = get_user_active_chat(user_id)
+    if active == chat_name:
+        remaining = get_user_chats_list(user_id)
+        new_active = remaining[0] if remaining else "chat_1"
+        db.set(f"user:{user_id}:active_chat", new_active)
+        db.sadd(f"user:{user_id}:chats_list", new_active)
+
+
+def cleanup_orphan_chats(user_id):
+    """Сканирует базу данных и удаляет все устаревшие/заброшенные ключи чатов пользователя"""
+    if not db:
+        return 0
+
+    valid_chats = set(get_user_chats_list(user_id))
+    pattern = f"user:{user_id}:chat:*"
+    deleted_count = 0
+
+    try:
+        # Получаем список всех ключей чатов данного пользователя
+        keys = db.keys(pattern)
+        if not keys:
+            return 0
+
+        for key in keys:
+            key_str = key.decode('utf-8') if isinstance(key, bytes) else str(key)
+            # Извлекаем имя чата из формата user:{id}:chat:{chat_name}
+            chat_name = key_str.replace(f"user:{user_id}:chat:", "")
+            
+            # Если этого чата нет в списке активных/сохранённых чатов — удаляем
+            if chat_name not in valid_chats:
+                db.delete(key_str)
+                deleted_count += 1
+    except Exception as e:
+        print(f"Ошибка при очистке заброшенных ключей: {e}")
+
+    return deleted_count
+
+
+# ---- KEYBOARD BUILDERS ----
+
+def build_chats_menu_keyboard(user_id):
+    active = get_user_active_chat(user_id)
+    chats = get_user_chats_list(user_id)
+
+    buttons = []
+    
+    for c in chats:
+        prefix = "👉 " if c == active else "💬 "
+        buttons.append([{"text": f"{prefix}{c}", "callback_data": f"switch_chat_{c}"}])
+
+    buttons.append([{"text": "➕ Новый чат", "callback_data": "action_new_chat"}])
+    buttons.append([
+        {"text": "📜 История", "callback_data": "action_view_history"},
+        {"text": "🗑 Удалить текущий", "callback_data": f"confirm_del_{active}"}
+    ])
+    buttons.append([{"text": "🧹 Очистить старые чаты", "callback_data": "action_clean_orphans"}])
+    buttons.append([{"text": "❌ Закрыть", "callback_data": "close_menu"}])
+
+    return {"inline_keyboard": buttons}
+
+
+def build_delete_confirm_keyboard(chat_name):
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "✅ Да, удалить", "callback_data": f"do_del_{chat_name}"},
+                {"text": "❌ Отмена", "callback_data": "chats_menu"}
+            ]
+        ]
+    }
+
 
 def build_main_settings_keyboard(user_id):
     text_m = get_user_setting(user_id, "model_text", "auto")
@@ -200,7 +287,6 @@ def build_category_keyboard(user_id, category_type):
         prefix = "set_mod_"
 
     buttons = []
-
     auto_mark = "✅ " if current == "auto" else ""
     buttons.append([{"text": f"{auto_mark}⚡ AUTO (Автовыбор)", "callback_data": f"{prefix}auto"}])
 
@@ -218,23 +304,17 @@ def get_system_prompt_for_model(model_name):
     m_lower = model_name.lower()
 
     if "gemma" in m_lower:
-        name = "Gemma"
-        creator = "Google"
+        name, creator = "Gemma", "Google"
     elif "llama" in m_lower:
-        name = "Llama"
-        creator = "Meta"
+        name, creator = "Llama", "Meta"
     elif "qwen" in m_lower:
-        name = "Qwen"
-        creator = "Alibaba"
+        name, creator = "Qwen", "Alibaba"
     elif "gpt-oss" in m_lower:
-        name = "GPT-OSS"
-        creator = "OpenAI"
+        name, creator = "GPT-OSS", "OpenAI"
     elif "mixtral" in m_lower or "mistral" in m_lower:
-        name = "Mistral"
-        creator = "Mistral AI"
+        name, creator = "Mistral", "Mistral AI"
     else:
-        name = model_name
-        creator = "Groq"
+        name, creator = model_name, "Groq"
 
     return (
         f"Ты — виртуальный помощник {name}, созданный компанией {creator}. "
@@ -373,15 +453,22 @@ class handler(BaseHTTPRequestHandler):
         text = clean_command(raw_text)
         voice = message.get("voice")
 
-        # КОМАНДЫ ПРИВЕТСТВИЯ И НАСТРОЙКИ МОДЕЛЕЙ
+        # КОМАНДЫ ПРИВЕТСТВИЯ И НАСТРОЙКИ
         if text.startswith("/start"):
-            telegram_send(chat_id, "👋 Привет! Я AI-помощник.\nИспользуй `/setmodel` для выбора моделей или просто отправь сообщение.", message_id)
+            telegram_send(chat_id, "👋 Привет! Я AI-помощник.\n\nИспользуй `/chats` для управления диалогами или `/setmodel` для выбора моделей.", message_id)
             self._send_ok()
             return
 
         if text.startswith("/setmodel") or text.startswith("/models"):
             kb = build_main_settings_keyboard(user_id)
-            telegram_send(chat_id, "⚙️ *Настройки моделей AI*\n\nВыберите категорию для настройки:", reply_markup=kb)
+            telegram_send(chat_id, "⚙️ *Настройки моделей AI*\n\nВыберите категорию:", reply_markup=kb)
+            self._send_ok()
+            return
+
+        if text.startswith("/chats"):
+            kb = build_chats_menu_keyboard(user_id)
+            active = escape_markdown(get_user_active_chat(user_id))
+            telegram_send(chat_id, f"📋 *Управление диалогами*\n\nТекущий активный чат: *{active}*", reply_markup=kb)
             self._send_ok()
             return
 
@@ -413,84 +500,23 @@ class handler(BaseHTTPRequestHandler):
             self._send_ok()
             return
 
-        # УПРАВЛЕНИЕ ЧАТАМИ
-        if text.startswith("/newchat"):
-            parts = text.split(maxsplit=1)
-            if len(parts) > 1 and parts[1].strip():
-                new_chat_name = parts[1].strip()
-            else:
-                count = len(db.smembers(f'user:{user_id}:chats_list')) if db else 0
-                new_chat_name = f"chat_{count + 1}"
-
-            if db:
-                db.set(f"user:{user_id}:active_chat", new_chat_name)
-                db.sadd(f"user:{user_id}:chats_list", new_chat_name)
-            
-            safe_name = escape_markdown(new_chat_name)
-            telegram_send(chat_id, f"✅ Чат переключён на: *{safe_name}*", message_id)
-            self._send_ok()
-            return
-
-        elif text.startswith("/chats"):
-            if not db:
-                telegram_send(chat_id, "База данных недоступна.", message_id)
-                self._send_ok()
-                return
-            active = get_user_active_chat(user_id)
-            raw_chats = db.smembers(f"user:{user_id}:chats_list")
-            
-            chats_list = []
-            for c in raw_chats:
-                name = c.decode('utf-8') if isinstance(c, bytes) else str(c)
-                safe_n = escape_markdown(name)
-                if name == active:
-                    chats_list.append(f"👉 *{safe_n}* (активный)")
-                else:
-                    chats_list.append(f"🔹 {safe_n}")
-
-            msg = "📋 *Ваши диалоги:*\n\n" + "\n".join(chats_list) + "\n\nПереключить: `/newchat <название>`"
-            telegram_send(chat_id, msg, message_id)
-            self._send_ok()
-            return
-
-        elif text.startswith("/history"):
-            active_chat = get_user_active_chat(user_id)
-            history = get_chat_history(user_id, active_chat)
-            safe_active = escape_markdown(active_chat)
-            if not history:
-                telegram_send(chat_id, f"📭 История диалога *{safe_active}* пуста.", message_id)
-            else:
-                formatted = [f"📜 *История диалога ({safe_active}):*"]
-                for m in history:
-                    role_str = '👤 Вы' if m['role'] == 'user' else '🤖 AI'
-                    formatted.append(f"*{role_str}:* {m['content']}")
-                telegram_send(chat_id, "\n\n".join(formatted), message_id)
-            self._send_ok()
-            return
-
-        elif text.startswith("/deletechat"):
-            parts = text.split(maxsplit=1)
-            active_chat = get_user_active_chat(user_id)
-            target_chat = parts[1].strip() if len(parts) > 1 else active_chat
-            if db:
-                db.delete(f"user:{user_id}:chat:{target_chat}")
-                db.srem(f"user:{user_id}:chats_list", target_chat)
-                if target_chat == active_chat:
-                    db.set(f"user:{user_id}:active_chat", "chat_1")
-                    db.sadd(f"user:{user_id}:chats_list", "chat_1")
-            
-            safe_target = escape_markdown(target_chat)
-            telegram_send(chat_id, f"🗑 Диалог *{safe_target}* удалён.", message_id)
-            self._send_ok()
-            return
-
         # ИЗВЛЕЧЕНИЕ ТЕКСТА ЗАПРОСА В ЛИЧНЫХ СООБЩЕНИЯХ И ГРУППАХ
         prompt = None
 
         if chat_type == "private":
+            if text.startswith("/newchat"):
+                parts = text.split(maxsplit=1)
+                new_chat_name = parts[1].strip() if len(parts) > 1 and parts[1].strip() else f"chat_{len(get_user_chats_list(user_id)) + 1}"
+                if db:
+                    db.set(f"user:{user_id}:active_chat", new_chat_name)
+                    db.sadd(f"user:{user_id}:chats_list", new_chat_name)
+                telegram_send(chat_id, f"✅ Создан и переключён чат: *{escape_markdown(new_chat_name)}*", message_id)
+                self._send_ok()
+                return
+
             prompt = text[5:].strip() if text.startswith("/ask ") else text
+
         elif chat_type in ("group", "supergroup"):
-            # Проверяем условия для группы:
             is_reply_to_bot = False
             reply_msg = message.get("reply_to_message")
             if reply_msg and reply_msg.get("from", {}).get("is_bot"):
@@ -501,7 +527,6 @@ class handler(BaseHTTPRequestHandler):
             if text.startswith("/ask "):
                 prompt = text[5:].strip()
             elif bot_mentioned:
-                # Удаляем из текста юзернейм бота
                 clean_txt = re.sub(f"@{BOT_USERNAME}", "", raw_text, flags=re.IGNORECASE).strip()
                 prompt = clean_txt
             elif is_reply_to_bot:
@@ -524,7 +549,7 @@ class handler(BaseHTTPRequestHandler):
 
         prefix = ""
         if is_fallback:
-            prefix = f"⚠️ *Внимание! Основная модель недоступна. Автопереключение на:* `{used_model}`\n\n"
+            prefix = f"⚠️ *Основная модель недоступна. Переключение на:* `{used_model}`\n\n"
 
         full_response = prefix + answer
 
@@ -546,9 +571,68 @@ class handler(BaseHTTPRequestHandler):
         message_id = msg.get("message_id")
         user_id = cb.get("from", {}).get("id", chat_id)
 
-        if data == "main_menu":
+        # МЕНЮ ЧАТОВ
+        if data == "chats_menu":
+            kb = build_chats_menu_keyboard(user_id)
+            active = escape_markdown(get_user_active_chat(user_id))
+            telegram_edit_message(chat_id, message_id, f"📋 *Управление диалогами*\n\nТекущий активный чат: *{active}*", reply_markup=kb)
+
+        elif data.startswith("switch_chat_"):
+            target_chat = data[12:]
+            if db:
+                db.set(f"user:{user_id}:active_chat", target_chat)
+            telegram_answer_callback(cb_id, f"Переключено на: {target_chat}")
+            kb = build_chats_menu_keyboard(user_id)
+            telegram_edit_message(chat_id, message_id, f"📋 *Управление диалогами*\n\nТекущий активный чат: *{escape_markdown(target_chat)}*", reply_markup=kb)
+
+        elif data == "action_new_chat":
+            count = len(get_user_chats_list(user_id)) + 1
+            new_name = f"chat_{count}"
+            if db:
+                db.set(f"user:{user_id}:active_chat", new_name)
+                db.sadd(f"user:{user_id}:chats_list", new_name)
+            telegram_answer_callback(cb_id, f"Создан чат: {new_name}")
+            kb = build_chats_menu_keyboard(user_id)
+            telegram_edit_message(chat_id, message_id, f"✅ Создан и выбран новый чат: *{escape_markdown(new_name)}*\n\nИли напишите `/newchat <имя>`, чтобы дать своё название.", reply_markup=kb)
+
+        elif data.startswith("confirm_del_"):
+            target_chat = data[12:]
+            kb = build_delete_confirm_keyboard(target_chat)
+            telegram_edit_message(chat_id, message_id, f"⚠️ *Вы точно хотите удалить чат «{escape_markdown(target_chat)}»?*\nВся история этого диалога будет безвозвратно очищена.", reply_markup=kb)
+
+        elif data.startswith("do_del_"):
+            target_chat = data[7:]
+            purge_chat_data(user_id, target_chat)
+            telegram_answer_callback(cb_id, f"Чат {target_chat} удалён!")
+            kb = build_chats_menu_keyboard(user_id)
+            active = escape_markdown(get_user_active_chat(user_id))
+            telegram_edit_message(chat_id, message_id, f"🗑 Чат *{escape_markdown(target_chat)}* успешно удалён.\n\nТекущий активный чат: *{active}*", reply_markup=kb)
+
+        elif data == "action_clean_orphans":
+            deleted_count = cleanup_orphan_chats(user_id)
+            telegram_answer_callback(cb_id, f"Очищено {deleted_count} устаревших ключей!")
+            kb = build_chats_menu_keyboard(user_id)
+            active = escape_markdown(get_user_active_chat(user_id))
+            telegram_edit_message(chat_id, message_id, f"🧹 Сканирование завершено!\nУдалено устаревших ключей из базы: *{deleted_count}*\n\nТекущий активный чат: *{active}*", reply_markup=kb)
+
+        elif data == "action_view_history":
+            active_chat = get_user_active_chat(user_id)
+            history = get_chat_history(user_id, active_chat)
+            safe_active = escape_markdown(active_chat)
+            if not history:
+                telegram_answer_callback(cb_id, "История пуста")
+                telegram_send(chat_id, f"📭 История диалога *{safe_active}* пуста.")
+            else:
+                formatted = [f"📜 *История диалога ({safe_active}):*"]
+                for m in history:
+                    role_str = '👤 Вы' if m['role'] == 'user' else '🤖 AI'
+                    formatted.append(f"*{role_str}:* {m['content']}")
+                telegram_send(chat_id, "\n\n".join(formatted))
+
+        # МЕНЮ МОДЕЛЕЙ
+        elif data == "main_menu":
             kb = build_main_settings_keyboard(user_id)
-            telegram_edit_message(chat_id, message_id, "⚙️ *Настройки моделей AI*\n\nВыберите категорию для настройки:", reply_markup=kb)
+            telegram_edit_message(chat_id, message_id, "⚙️ *Настройки моделей AI*\n\nВыберите категорию:", reply_markup=kb)
 
         elif data == "cat_text":
             kb = build_category_keyboard(user_id, "text")
@@ -566,7 +650,7 @@ class handler(BaseHTTPRequestHandler):
             set_user_setting(user_id, "model_text", "auto")
             set_user_setting(user_id, "model_voice", "auto")
             set_user_setting(user_id, "model_mod", "auto")
-            telegram_answer_callback(cb_id, "⚡ Режим AUTO включён для всех категорий!")
+            telegram_answer_callback(cb_id, "⚡ AUTO применён!")
             kb = build_main_settings_keyboard(user_id)
             telegram_edit_message(chat_id, message_id, "⚙️ *Настройки моделей AI*\n\n✅ AUTO применён ко всем категориям!", reply_markup=kb)
 
@@ -592,8 +676,8 @@ class handler(BaseHTTPRequestHandler):
             telegram_edit_message(chat_id, message_id, "🛡 *Выбор модели модерации:*", reply_markup=kb)
 
         elif data == "close_menu":
-            telegram_answer_callback(cb_id, "Меню закрыто")
-            telegram_edit_message(chat_id, message_id, "❌ Настройки закрыты.")
+            telegram_answer_callback(cb_id, "Закрыто")
+            telegram_edit_message(chat_id, message_id, "❌ Меню закрыто.")
 
     def do_GET(self):
         self.send_response(200)
@@ -606,3 +690,4 @@ class handler(BaseHTTPRequestHandler):
         self.send_header('Content-type', 'application/json')
         self.end_headers()
         self.wfile.write(json.dumps({"ok": True}).encode('utf-8'))
+    
