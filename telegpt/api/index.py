@@ -79,7 +79,7 @@ def fetch_all_groq_models():
 
 def get_categorized_models():
     all_models = fetch_all_groq_models()
-    
+
     text_models = [m for m in all_models if not any(x in m for x in ["whisper", "prompt-guard", "safeguard", "orpheus"])]
     voice_models = [m for m in all_models if "whisper" in m]
     mod_models = [m for m in all_models if any(x in m for x in ["safeguard", "prompt-guard"])]
@@ -156,7 +156,7 @@ def build_main_settings_keyboard(user_id):
 
 def build_category_keyboard(user_id, category_type):
     text_models, voice_models, mod_models = get_categorized_models()
-    
+
     if category_type == "text":
         models = text_models
         current = get_user_setting(user_id, "model_text", "auto")
@@ -171,8 +171,7 @@ def build_category_keyboard(user_id, category_type):
         prefix = "set_mod_"
 
     buttons = []
-    
-    # Кнопка AUTO
+
     auto_mark = "✅ " if current == "auto" else ""
     buttons.append([{"text": f"{auto_mark}⚡ AUTO (Автовыбор)", "callback_data": f"{prefix}auto"}])
 
@@ -184,7 +183,38 @@ def build_category_keyboard(user_id, category_type):
     return {"inline_keyboard": buttons}
 
 
-# ---- AI LOGIC ----
+# ---- AI LOGIC & SYSTEM PROMPTS ----
+
+def get_system_prompt_for_model(model_name):
+    """Динамический системный промпт для корректной самоидентификации"""
+    m_lower = model_name.lower()
+
+    if "gemma" in m_lower:
+        name = "Gemma"
+        creator = "Google"
+    elif "llama" in m_lower:
+        name = "Llama"
+        creator = "Meta"
+    elif "qwen" in m_lower:
+        name = "Qwen"
+        creator = "Alibaba"
+    elif "gpt-oss" in m_lower:
+        name = "GPT-OSS"
+        creator = "OpenAI"
+    elif "mixtral" in m_lower or "mistral" in m_lower:
+        name = "Mistral"
+        creator = "Mistral AI"
+    else:
+        name = model_name
+        creator = "Groq"
+
+    return (
+        f"Ты — виртуальный помощник {name}, созданный компанией {creator}. "
+        f"Твоя задача — отвечать на вопросы пользователей и помогать в самых разных задачах. "
+        f"Если тебя спрашивают кто ты, ты должен строго отвечать: "
+        f"«Я — виртуальный помощник {name}, созданный компанией {creator}. Моя задача — отвечать на ваши вопросы и помогать в самых разных задачах. Чем могу быть полезен?»"
+    )
+
 
 def transcribe_voice(user_id, file_id):
     file_url = get_telegram_file_url(file_id)
@@ -235,13 +265,16 @@ def check_moderation(user_id, text_to_check):
 
 
 def ask_groq_with_fallback(user_id, history, prompt):
-    messages = [{"role": "system", "content": "You are a helpful AI assistant in Telegram."}]
+    selected_model = get_user_setting(user_id, "model_text", "auto")
+    text_models, _, _ = get_categorized_models()
+
+    target_model = selected_model if selected_model != "auto" else (text_models[0] if text_models else "llama-3.3-70b-versatile")
+    system_instruction = get_system_prompt_for_model(target_model)
+
+    messages = [{"role": "system", "content": system_instruction}]
     for msg in history:
         messages.append({"role": msg["role"], "content": msg["content"]})
     messages.append({"role": "user", "content": prompt})
-
-    selected_model = get_user_setting(user_id, "model_text", "auto")
-    text_models, _, _ = get_categorized_models()
 
     if selected_model != "auto":
         response = groq.chat.completions.create(
@@ -255,6 +288,9 @@ def ask_groq_with_fallback(user_id, history, prompt):
     last_error = None
     for model_name in text_models:
         try:
+            current_system = get_system_prompt_for_model(model_name)
+            messages[0] = {"role": "system", "content": current_system}
+
             response = groq.chat.completions.create(
                 model=model_name,
                 messages=messages,
@@ -286,14 +322,14 @@ class handler(BaseHTTPRequestHandler):
             self._send_ok()
             return
 
-        # 1. ОБРАБОТКА НАЖАТИЙ НА КНОПКИ (Callback Queries)
+        # 1. ОБРАБОТКА ИНТЕРАКТИВНЫХ КНОПОК
         callback_query = update.get("callback_query")
         if callback_query:
             self._handle_callback(callback_query)
             self._send_ok()
             return
 
-        # 2. ОБРАБОТКА ОБЫЧНЫХ СООБЩЕНИЙ
+        # 2. ОБРАБОТКА СООБЩЕНИЙ
         message = update.get("message")
         if not message:
             self._send_ok()
@@ -308,14 +344,14 @@ class handler(BaseHTTPRequestHandler):
         text = message.get("text", "").strip()
         voice = message.get("voice")
 
-        # ---- КОМАНДА /SETMODEL ----
+        # КОМАНДЫ НАСТРОЙКИ МОДЕЛЕЙ
         if text.startswith("/setmodel") or text == "/models":
             kb = build_main_settings_keyboard(user_id)
             telegram_send(chat_id, "⚙️ *Настройки моделей AI*\n\nВыберите категорию для настройки:", reply_markup=kb)
             self._send_ok()
             return
 
-        # ---- ОБРАБОТКА ГОЛОСОВОГО СООБЩЕНИЯ ----
+        # ГОЛОСОВЫЕ СООБЩЕНИЯ
         if voice:
             try:
                 telegram_send(chat_id, "🎙 *Распознаю голос...*", message_id)
@@ -330,7 +366,7 @@ class handler(BaseHTTPRequestHandler):
             self._send_ok()
             return
 
-        # ---- МОДЕРАЦИЯ ----
+        # МОДЕРАЦИЯ
         if text.startswith("/moderation"):
             check_text = text[11:].strip()
             if not check_text:
@@ -342,7 +378,7 @@ class handler(BaseHTTPRequestHandler):
             self._send_ok()
             return
 
-        # ---- КОМАНДЫ ЧАТОВ ----
+        # УПРАВЛЕНИЕ ЧАТАМИ
         if text.startswith("/newchat"):
             parts = text.split(maxsplit=1)
             new_chat_name = parts[1].strip().replace(" ", "_") if len(parts) > 1 else f"chat_{(len(db.smembers(f'user:{user_id}:chats_list')) if db else 0) + 1}"
@@ -391,7 +427,7 @@ class handler(BaseHTTPRequestHandler):
             self._send_ok()
             return
 
-        # ---- ИЗВЛЕЧЕНИЕ ВОПРОСА ----
+        # ИЗВЛЕЧЕНИЕ ТЕКСТА ЗАПРОСА
         prompt = None
         if chat_type == "private":
             prompt = text[5:].strip() if text.startswith("/ask ") else text
@@ -405,7 +441,7 @@ class handler(BaseHTTPRequestHandler):
         active_chat = get_user_active_chat(user_id)
         history = get_chat_history(user_id, active_chat)
 
-        # ---- ЗАПРОС К AI ----
+        # ЗАПРОС К AI
         try:
             answer, used_model, is_fallback = ask_groq_with_fallback(user_id, history, prompt)
         except Exception as e:
@@ -419,7 +455,7 @@ class handler(BaseHTTPRequestHandler):
 
         full_response = prefix + answer
 
-        # Сохранение истории
+        # СОХРАНЕНИЕ КОНТЕКСТА
         history.append({"role": "user", "content": prompt})
         history.append({"role": "assistant", "content": answer})
         save_chat_history(user_id, active_chat, history)
