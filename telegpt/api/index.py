@@ -287,13 +287,11 @@ def build_chats_menu_keyboard(user_id, page=1):
 
     buttons = []
     
-    # Список чатов
     for c in current_page_chats:
         prefix = "👉 " if c == active else "💬 "
         clean_c = c[:20]
         buttons.append([{"text": f"{prefix}{clean_c}", "callback_data": f"sw_ch_{clean_c}_{page}"}])
 
-    # Навигация пагинации
     nav_row = []
     if page > 1:
         nav_row.append({"text": "⬅️ Назад", "callback_data": f"chats_p_{page - 1}"})
@@ -302,16 +300,28 @@ def build_chats_menu_keyboard(user_id, page=1):
         nav_row.append({"text": "Вперёд ➡️", "callback_data": f"chats_p_{page + 1}"})
     buttons.append(nav_row)
 
-    # Функциональные кнопки
-    buttons.append([{"text": "➕ Новый чат", "callback_data": "action_new_chat"}])
+    buttons.append([{"text": "➕ Новый чат", "callback_data": "prompt_new_chat"}])
     buttons.append([
-        {"text": "📜 История", "callback_data": "action_view_history"},
+        {"text": "✏️ Переименовать", "callback_data": f"ren_ch_{active[:20]}"},
         {"text": "🗑 Удалить текущий", "callback_data": f"confirm_del_{active[:20]}"}
     ])
+    buttons.append([{"text": "📜 Просмотр истории", "callback_data": "action_view_history"}])
     buttons.append([{"text": "🧹 Очистить старые чаты", "callback_data": "action_clean_orphans"}])
     buttons.append([{"text": "❌ Закрыть", "callback_data": "close_menu"}])
 
     return {"inline_keyboard": buttons}
+
+
+def build_new_chat_options_keyboard():
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "✏️ Своё название", "callback_data": "create_custom_title"},
+                {"text": "🤖 Авто (AI)", "callback_data": "create_auto_title"}
+            ],
+            [{"text": "❌ Отмена", "callback_data": "chats_p_1"}]
+        ]
+    }
 
 
 def build_delete_confirm_keyboard(chat_name):
@@ -542,13 +552,36 @@ class handler(BaseHTTPRequestHandler):
         text = clean_command(raw_text)
         voice = message.get("voice")
 
+        # ПРОВЕРКА РЕЖИМА ОЖИДАНИЯ ВВОДА НАЗВАНИЯ ЧАТА
+        state = get_user_setting(user_id, "awaiting_state", "none")
+        if state in ["new_chat_name", "rename_chat_name"] and raw_text and not raw_text.startswith("/"):
+            new_title = raw_text.strip()[:30]
+            set_user_setting(user_id, "awaiting_state", "none")
+
+            if state == "new_chat_name":
+                if db:
+                    db.set(f"user:{user_id}:active_chat", new_title)
+                    db.sadd(f"user:{user_id}:chats_list", new_title)
+                kb = build_chats_menu_keyboard(user_id, page=1)
+                telegram_send(chat_id, f"✅ Создан и выбран чат: *{escape_markdown(new_title)}*", reply_markup=kb)
+            else:
+                target_chat = get_user_setting(user_id, "rename_target", get_user_active_chat(user_id))
+                if rename_user_chat(user_id, target_chat, new_title):
+                    kb = build_chats_menu_keyboard(user_id, page=1)
+                    telegram_send(chat_id, f"✏️ Чат переименован в: *{escape_markdown(new_title)}*", reply_markup=kb)
+                else:
+                    telegram_send(chat_id, "❌ Не удалось переименовать чат.", message_id)
+            self._send_ok()
+            return
+
         # ОСНОВНЫЕ И ДОПОЛНИТЕЛЬНЫЕ КОМАНДЫ БОТА
         if text.startswith("/start") or text.startswith("/help"):
+            set_user_setting(user_id, "awaiting_state", "none")
             help_msg = (
                 "👋 *Привет! Я мультимодальный AI-помощник.*\n\n"
                 "📌 *Основные команды:*\n"
-                "• `/chats` — Управление диалогами (создание, переключение, удаление)\n"
-                "• `/newchat <имя>` — Создать новый чат со своим именем\n"
+                "• `/chats` — Управление диалогами (создание, переименование, удаление)\n"
+                "• `/newchat <имя>` — Быстро создать чат со своим именем\n"
                 "• `/rename <новое_имя>` — Переименовать текущий чат\n"
                 "• `/setmodel` или `/models` — Настройки моделей AI\n"
                 "• `/clear` — Очистить историю текущего чата\n"
@@ -561,12 +594,14 @@ class handler(BaseHTTPRequestHandler):
             return
 
         if text.startswith("/setmodel") or text.startswith("/models"):
+            set_user_setting(user_id, "awaiting_state", "none")
             kb = build_main_settings_keyboard(user_id)
             telegram_send(chat_id, "⚙️ *Настройки моделей AI*\n\nВыберите категорию:", reply_markup=kb)
             self._send_ok()
             return
 
         if text.startswith("/chats"):
+            set_user_setting(user_id, "awaiting_state", "none")
             kb = build_chats_menu_keyboard(user_id, page=1)
             active = escape_markdown(get_user_active_chat(user_id))
             telegram_send(chat_id, f"📋 *Управление диалогами*\n\nТекущий активный чат: *{active}*", reply_markup=kb)
@@ -574,6 +609,7 @@ class handler(BaseHTTPRequestHandler):
             return
 
         if text.startswith("/rename"):
+            set_user_setting(user_id, "awaiting_state", "none")
             parts = raw_text.split(maxsplit=1)
             if len(parts) < 2 or not parts[1].strip():
                 telegram_send(chat_id, "⚠️ Укажите новое имя чата:\n`/rename Мой новый чат`", message_id)
@@ -589,6 +625,7 @@ class handler(BaseHTTPRequestHandler):
             return
 
         if text.startswith("/clear"):
+            set_user_setting(user_id, "awaiting_state", "none")
             active = get_user_active_chat(user_id)
             if db:
                 db.delete(f"user:{user_id}:chat:{active}")
@@ -597,6 +634,7 @@ class handler(BaseHTTPRequestHandler):
             return
 
         if text.startswith("/info") or text.startswith("/status"):
+            set_user_setting(user_id, "awaiting_state", "none")
             active = get_user_active_chat(user_id)
             txt_m = get_user_setting(user_id, "model_text", "auto")
             voc_m = get_user_setting(user_id, "model_voice", "auto")
@@ -617,6 +655,7 @@ class handler(BaseHTTPRequestHandler):
 
         # РАСПОЗНАВАНИЕ И ОБРАБОТКА ГОЛОСА
         if voice:
+            set_user_setting(user_id, "awaiting_state", "none")
             try:
                 telegram_send(chat_id, "🎙 *Распознаю голос...*", message_id)
                 transcribed_text, used_voice_model = transcribe_voice(user_id, voice.get("file_id"))
@@ -632,6 +671,7 @@ class handler(BaseHTTPRequestHandler):
 
         # МОДЕРАЦИЯ
         if text.startswith("/moderation"):
+            set_user_setting(user_id, "awaiting_state", "none")
             check_text = raw_text[11:].strip()
             if not check_text:
                 telegram_send(chat_id, "Использование: `/moderation <текст>`", message_id)
@@ -646,6 +686,7 @@ class handler(BaseHTTPRequestHandler):
         if not prompt:
             if chat_type == "private":
                 if text.startswith("/newchat"):
+                    set_user_setting(user_id, "awaiting_state", "none")
                     parts = raw_text.split(maxsplit=1)
                     if len(parts) > 1 and parts[1].strip():
                         new_chat_name = parts[1].strip()[:30]
@@ -684,6 +725,7 @@ class handler(BaseHTTPRequestHandler):
             self._send_ok()
             return
 
+        set_user_setting(user_id, "awaiting_state", "none")
         active_chat = get_user_active_chat(user_id)
         history = get_chat_history(user_id, active_chat)
 
@@ -732,12 +774,14 @@ class handler(BaseHTTPRequestHandler):
 
         # ПАГИНАЦИЯ И МЕНЮ ЧАТОВ
         if data.startswith("chats_p_"):
+            set_user_setting(user_id, "awaiting_state", "none")
             page = int(data.split("_")[2])
             kb = build_chats_menu_keyboard(user_id, page=page)
             active = escape_markdown(get_user_active_chat(user_id))
             telegram_edit_message(chat_id, message_id, f"📋 *Управление диалогами*\n\nТекущий активный чат: *{active}*", reply_markup=kb)
 
         elif data.startswith("sw_ch_"):
+            set_user_setting(user_id, "awaiting_state", "none")
             parts = data.split("_")
             target_chat = parts[2]
             page = int(parts[3]) if len(parts) > 3 else 1
@@ -752,7 +796,17 @@ class handler(BaseHTTPRequestHandler):
             kb = build_chats_menu_keyboard(user_id, page=page)
             telegram_edit_message(chat_id, message_id, f"📋 *Управление диалогами*\n\nТекущий активный чат: *{escape_markdown(target_chat)}*", reply_markup=kb)
 
-        elif data == "action_new_chat":
+        elif data == "prompt_new_chat":
+            kb = build_new_chat_options_keyboard()
+            telegram_edit_message(chat_id, message_id, "➕ *Создание нового чата*\n\nВыберите способ задания названия:", reply_markup=kb)
+
+        elif data == "create_custom_title":
+            set_user_setting(user_id, "awaiting_state", "new_chat_name")
+            telegram_answer_callback(cb_id)
+            telegram_send(chat_id, "✏️ *Напишите название для нового чата в ответе на это сообщение:*")
+
+        elif data == "create_auto_title":
+            set_user_setting(user_id, "awaiting_state", "none")
             count = len(get_user_chats_list(user_id)) + 1
             new_name = f"Новый чат {count}"
             if db:
@@ -760,22 +814,30 @@ class handler(BaseHTTPRequestHandler):
                     db.set(f"user:{user_id}:active_chat", new_name)
                     db.sadd(f"user:{user_id}:chats_list", new_name)
                 except Exception as e:
-                    print(f"DB Error action_new_chat: {e}")
-            telegram_answer_callback(cb_id, f"Создан чат: {new_name}")
+                    print(f"DB Error create_auto_title: {e}")
+            telegram_answer_callback(cb_id, f"Создан: {new_name}")
             kb = build_chats_menu_keyboard(user_id, page=1)
             msg_text = (
-                f"✅ Создан и выбран: *{escape_markdown(new_name)}*\n\n"
-                f"💡 При первом сообщении нейросеть автоматически переименует его по смыслу темы.\n"
-                f"Или укажите своё имя через команду: `/newchat Имя`"
+                f"🤖 *Создан новый чат:* `{escape_markdown(new_name)}`\n\n"
+                f"Отправьте первое сообщение, и нейросеть автоматически переименует его по смыслу темы!"
             )
             telegram_edit_message(chat_id, message_id, msg_text, reply_markup=kb)
 
+        elif data.startswith("ren_ch_"):
+            target_chat = data[7:]
+            set_user_setting(user_id, "awaiting_state", "rename_chat_name")
+            set_user_setting(user_id, "rename_target", target_chat)
+            telegram_answer_callback(cb_id)
+            telegram_send(chat_id, f"✏️ *Введите новое название для чата «{escape_markdown(target_chat)}»:*")
+
         elif data.startswith("confirm_del_"):
+            set_user_setting(user_id, "awaiting_state", "none")
             target_chat = data[12:]
             kb = build_delete_confirm_keyboard(target_chat)
             telegram_edit_message(chat_id, message_id, f"⚠️ *Вы точно хотите удалить чат «{escape_markdown(target_chat)}»?*\nВся история этого диалога будет безвозвратно очищена.", reply_markup=kb)
 
         elif data.startswith("do_del_"):
+            set_user_setting(user_id, "awaiting_state", "none")
             target_chat = data[7:]
             purge_chat_data(user_id, target_chat)
             telegram_answer_callback(cb_id, f"Чат {target_chat} удалён!")
@@ -784,6 +846,7 @@ class handler(BaseHTTPRequestHandler):
             telegram_edit_message(chat_id, message_id, f"🗑 Чат *{escape_markdown(target_chat)}* успешно удалён.\n\nТекущий активный чат: *{active}*", reply_markup=kb)
 
         elif data == "action_clean_orphans":
+            set_user_setting(user_id, "awaiting_state", "none")
             deleted_count = cleanup_orphan_chats(user_id)
             telegram_answer_callback(cb_id, f"Очищено {deleted_count} устаревших ключей!")
             kb = build_chats_menu_keyboard(user_id, page=1)
@@ -791,6 +854,7 @@ class handler(BaseHTTPRequestHandler):
             telegram_edit_message(chat_id, message_id, f"🧹 Сканирование завершено!\nУдалено устаревших ключей из базы: *{deleted_count}*\n\nТекущий активный чат: *{active}*", reply_markup=kb)
 
         elif data == "action_view_history":
+            set_user_setting(user_id, "awaiting_state", "none")
             active_chat = get_user_active_chat(user_id)
             history = get_chat_history(user_id, active_chat)
             safe_active = escape_markdown(active_chat)
@@ -806,22 +870,27 @@ class handler(BaseHTTPRequestHandler):
 
         # МЕНЮ МОДЕЛЕЙ
         elif data == "main_menu":
+            set_user_setting(user_id, "awaiting_state", "none")
             kb = build_main_settings_keyboard(user_id)
             telegram_edit_message(chat_id, message_id, "⚙️ *Настройки моделей AI*\n\nВыберите категорию:", reply_markup=kb)
 
         elif data == "cat_text":
+            set_user_setting(user_id, "awaiting_state", "none")
             kb = build_category_keyboard(user_id, "text")
             telegram_edit_message(chat_id, message_id, "📝 *Выбор текстовой модели (Чат):*", reply_markup=kb)
 
         elif data == "cat_voice":
+            set_user_setting(user_id, "awaiting_state", "none")
             kb = build_category_keyboard(user_id, "voice")
             telegram_edit_message(chat_id, message_id, "🎙 *Выбор модели распознавания голоса:*", reply_markup=kb)
 
         elif data == "cat_mod":
+            set_user_setting(user_id, "awaiting_state", "none")
             kb = build_category_keyboard(user_id, "mod")
             telegram_edit_message(chat_id, message_id, "🛡 *Выбор модели модерации:*", reply_markup=kb)
 
         elif data == "set_all_auto":
+            set_user_setting(user_id, "awaiting_state", "none")
             set_user_setting(user_id, "model_text", "auto")
             set_user_setting(user_id, "model_voice", "auto")
             set_user_setting(user_id, "model_mod", "auto")
@@ -830,6 +899,7 @@ class handler(BaseHTTPRequestHandler):
             telegram_edit_message(chat_id, message_id, "⚙️ *Настройки моделей AI*\n\n✅ AUTO применён ко всем категориям!", reply_markup=kb)
 
         elif data.startswith("set_txt_"):
+            set_user_setting(user_id, "awaiting_state", "none")
             m = data[8:]
             set_user_setting(user_id, "model_text", m)
             telegram_answer_callback(cb_id, f"Текстовая модель: {m}")
@@ -837,6 +907,7 @@ class handler(BaseHTTPRequestHandler):
             telegram_edit_message(chat_id, message_id, "📝 *Выбор текстовой модели (Чат):*", reply_markup=kb)
 
         elif data.startswith("set_voc_"):
+            set_user_setting(user_id, "awaiting_state", "none")
             m = data[8:]
             set_user_setting(user_id, "model_voice", m)
             telegram_answer_callback(cb_id, f"Голосовая модель: {m}")
@@ -844,6 +915,7 @@ class handler(BaseHTTPRequestHandler):
             telegram_edit_message(chat_id, message_id, "🎙 *Выбор модели распознавания голоса:*", reply_markup=kb)
 
         elif data.startswith("set_mod_"):
+            set_user_setting(user_id, "awaiting_state", "none")
             m = data[8:]
             set_user_setting(user_id, "model_mod", m)
             telegram_answer_callback(cb_id, f"Модель модерации: {m}")
@@ -851,6 +923,7 @@ class handler(BaseHTTPRequestHandler):
             telegram_edit_message(chat_id, message_id, "🛡 *Выбор модели модерации:*", reply_markup=kb)
 
         elif data == "close_menu":
+            set_user_setting(user_id, "awaiting_state", "none")
             telegram_answer_callback(cb_id, "Закрыто")
             telegram_edit_message(chat_id, message_id, "❌ Меню закрыто.")
 
@@ -865,4 +938,3 @@ class handler(BaseHTTPRequestHandler):
         self.send_header('Content-type', 'application/json')
         self.end_headers()
         self.wfile.write(json.dumps({"ok": True}).encode('utf-8'))
-    
