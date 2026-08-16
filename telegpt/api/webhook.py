@@ -12,7 +12,7 @@ TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 groq = Groq(api_key=GROQ_API_KEY)
 
 # Модель Groq
-MODEL = "openai/gpt-oss-120b"
+MODEL = "openai/gpt-oss-20b"
 
 
 def telegram_send(chat_id, text, reply_to=None):
@@ -48,7 +48,7 @@ def ask_groq(prompt):
                 "content": prompt
             }
         ],
-        max_completion_tokens=512,
+        max_completion_tokens=2048,
         reasoning_effort="low"
     )
 
