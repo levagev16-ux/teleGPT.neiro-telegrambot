@@ -37,9 +37,12 @@ def escape_markdown(text):
 
 
 def clean_command(text):
+    if not text:
+        return ""
+    text = text.strip()
     if text.startswith("/"):
         parts = text.split(maxsplit=1)
-        cmd = parts[0].split("@")[0]
+        cmd = parts[0].split("@")[0].lower()
         rest = " " + parts[1] if len(parts) > 1 else ""
         return cmd + rest
     return text
@@ -155,33 +158,33 @@ def set_user_setting(user_id, key, value):
 
 def get_user_active_chat(user_id):
     if not db:
-        return "chat_1"
+        return "Новый чат 1"
     try:
         active = db.get(f"user:{user_id}:active_chat")
         if not active:
-            active = "chat_1"
+            active = "Новый чат 1"
             db.set(f"user:{user_id}:active_chat", active)
             db.sadd(f"user:{user_id}:chats_list", active)
         return decode_val(active)
     except Exception as e:
         print(f"DB Error (get_user_active_chat): {e}")
-        return "chat_1"
+        return "Новый чат 1"
 
 
 def get_user_chats_list(user_id):
     if not db:
-        return ["chat_1"]
+        return ["Новый чат 1"]
     try:
         raw_chats = db.smembers(f"user:{user_id}:chats_list")
         if not raw_chats:
-            db.sadd(f"user:{user_id}:chats_list", "chat_1")
-            return ["chat_1"]
+            db.sadd(f"user:{user_id}:chats_list", "Новый чат 1")
+            return ["Новый чат 1"]
         chats = [decode_val(c) for c in raw_chats]
         chats.sort()
         return chats
     except Exception as e:
         print(f"DB Error (get_user_chats_list): {e}")
-        return ["chat_1"]
+        return ["Новый чат 1"]
 
 
 def get_chat_history(user_id, chat_name):
@@ -206,6 +209,26 @@ def save_chat_history(user_id, chat_name, history):
             print(f"DB Error (save_chat_history): {e}")
 
 
+def rename_user_chat(user_id, old_name, new_name):
+    if not db or not old_name or not new_name:
+        return False
+    try:
+        history = get_chat_history(user_id, old_name)
+        db.delete(f"user:{user_id}:chat:{old_name}")
+        db.srem(f"user:{user_id}:chats_list", old_name)
+
+        db.set(f"user:{user_id}:chat:{new_name}", json.dumps(history))
+        db.sadd(f"user:{user_id}:chats_list", new_name)
+
+        active = get_user_active_chat(user_id)
+        if active == old_name:
+            db.set(f"user:{user_id}:active_chat", new_name)
+        return True
+    except Exception as e:
+        print(f"DB Error (rename_user_chat): {e}")
+        return False
+
+
 def purge_chat_data(user_id, chat_name):
     if not db:
         return
@@ -216,7 +239,7 @@ def purge_chat_data(user_id, chat_name):
         active = get_user_active_chat(user_id)
         if active == chat_name:
             remaining = get_user_chats_list(user_id)
-            new_active = remaining[0] if remaining else "chat_1"
+            new_active = remaining[0] if remaining else "Новый чат 1"
             db.set(f"user:{user_id}:active_chat", new_active)
             db.sadd(f"user:{user_id}:chats_list", new_active)
     except Exception as e:
@@ -267,7 +290,8 @@ def build_chats_menu_keyboard(user_id, page=1):
     # Список чатов
     for c in current_page_chats:
         prefix = "👉 " if c == active else "💬 "
-        buttons.append([{"text": f"{prefix}{c}", "callback_data": f"sw_ch_{c}_{page}"}])
+        clean_c = c[:20]
+        buttons.append([{"text": f"{prefix}{clean_c}", "callback_data": f"sw_ch_{clean_c}_{page}"}])
 
     # Навигация пагинации
     nav_row = []
@@ -282,7 +306,7 @@ def build_chats_menu_keyboard(user_id, page=1):
     buttons.append([{"text": "➕ Новый чат", "callback_data": "action_new_chat"}])
     buttons.append([
         {"text": "📜 История", "callback_data": "action_view_history"},
-        {"text": "🗑 Удалить текущий", "callback_data": f"confirm_del_{active}"}
+        {"text": "🗑 Удалить текущий", "callback_data": f"confirm_del_{active[:20]}"}
     ])
     buttons.append([{"text": "🧹 Очистить старые чаты", "callback_data": "action_clean_orphans"}])
     buttons.append([{"text": "❌ Закрыть", "callback_data": "close_menu"}])
@@ -294,7 +318,7 @@ def build_delete_confirm_keyboard(chat_name):
     return {
         "inline_keyboard": [
             [
-                {"text": "✅ Да, удалить", "callback_data": f"do_del_{chat_name}"},
+                {"text": "✅ Да, удалить", "callback_data": f"do_del_{chat_name[:20]}"},
                 {"text": "❌ Отмена", "callback_data": "chats_p_1"}
             ]
         ]
@@ -348,6 +372,26 @@ def build_category_keyboard(user_id, category_type):
 
 # ---- AI LOGIC & SYSTEM PROMPTS ----
 
+def generate_chat_title_ai(first_message):
+    try:
+        if not groq:
+            return None
+        prompt = (
+            f"Придумай очень короткое название (2-4 слова) на русском языке для диалога, который начинается с этого сообщения: "
+            f"\"{first_message}\". Ответь ТОЛЬКО названием, без кавычек и лишних слов."
+        )
+        res = groq.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=[{"role": "user", "content": prompt}],
+            max_completion_tokens=20
+        )
+        title = res.choices[0].message.content.strip().replace('"', '').replace("'", "")
+        return title[:25] if title else None
+    except Exception as e:
+        print(f"Ошибка генерации имени чата: {e}")
+        return None
+
+
 def get_system_prompt_for_model(model_name):
     m_lower = model_name.lower()
 
@@ -357,15 +401,15 @@ def get_system_prompt_for_model(model_name):
         name, creator = "Llama", "Meta"
     elif "qwen" in m_lower:
         name, creator = "Qwen", "Alibaba"
-    elif "gpt-oss" in m_lower:
-        name, creator = "GPT-OSS", "OpenAI"
+    elif "gpt" in m_lower:
+        name, creator = "GPT", "OpenAI"
     elif "mixtral" in m_lower or "mistral" in m_lower:
         name, creator = "Mistral", "Mistral AI"
     else:
         name, creator = model_name, "Groq"
 
     return (
-        f"Ты — полезный ассистент {name}, созданный разработчиками {creator}. "
+        f"Ты — полезный ассистент {name}, работающий через Groq API ({creator}). "
         f"Отвечай пользователю прямо, грамотно и точно по сути его вопроса."
     )
 
@@ -373,9 +417,13 @@ def get_system_prompt_for_model(model_name):
 def transcribe_voice(user_id, file_id):
     file_url = get_telegram_file_url(file_id)
     if not file_url:
-        raise Exception("Не удалось скачать аудиофайл.")
+        raise Exception("Не удалось скачать голосовое сообщение из Telegram.")
 
-    audio_data = requests.get(file_url).content
+    res = requests.get(file_url, timeout=30)
+    if res.status_code != 200:
+        raise Exception(f"Ошибка загрузки аудиофайла: {res.status_code}")
+
+    audio_bytes = res.content
     selected_model = get_user_setting(user_id, "model_voice", "auto")
 
     _, voice_models, _ = get_categorized_models()
@@ -385,11 +433,13 @@ def transcribe_voice(user_id, file_id):
     for m in models_to_try:
         try:
             transcription = groq.audio.transcriptions.create(
-                file=("voice.ogg", audio_data, "audio/ogg"),
+                file=("voice.ogg", audio_bytes),
                 model=m,
                 response_format="json"
             )
-            return transcription.text, m
+            text_result = transcription.text.strip() if hasattr(transcription, "text") else str(transcription)
+            if text_result:
+                return text_result, m
         except Exception as e:
             last_err = e
             continue
@@ -438,8 +488,7 @@ def ask_groq_with_fallback(user_id, history, prompt):
             response = groq.chat.completions.create(
                 model=model_name,
                 messages=messages,
-                max_completion_tokens=2048,
-                reasoning_effort="low" if "gpt-oss" in model_name else None
+                max_completion_tokens=2048
             )
 
             answer = response.choices[0].message.content
@@ -499,12 +548,13 @@ class handler(BaseHTTPRequestHandler):
                 "👋 *Привет! Я мультимодальный AI-помощник.*\n\n"
                 "📌 *Основные команды:*\n"
                 "• `/chats` — Управление диалогами (создание, переключение, удаление)\n"
+                "• `/newchat <имя>` — Создать новый чат со своим именем\n"
+                "• `/rename <новое_имя>` — Переименовать текущий чат\n"
                 "• `/setmodel` или `/models` — Настройки моделей AI\n"
-                "• `/newchat <имя>` — Быстро создать и выбрать новый чат\n"
                 "• `/clear` — Очистить историю текущего чата\n"
                 "• `/info` или `/status` — Информация о боте и активной модели\n"
                 "• `/moderation <текст>` — Проверить текст моделью модерации\n\n"
-                "💬 Просто напишите сообщение, чтобы начать диалог!"
+                "💬 Отправьте текст или голосовое сообщение, чтобы начать!"
             )
             telegram_send(chat_id, help_msg, message_id)
             self._send_ok()
@@ -520,6 +570,21 @@ class handler(BaseHTTPRequestHandler):
             kb = build_chats_menu_keyboard(user_id, page=1)
             active = escape_markdown(get_user_active_chat(user_id))
             telegram_send(chat_id, f"📋 *Управление диалогами*\n\nТекущий активный чат: *{active}*", reply_markup=kb)
+            self._send_ok()
+            return
+
+        if text.startswith("/rename"):
+            parts = raw_text.split(maxsplit=1)
+            if len(parts) < 2 or not parts[1].strip():
+                telegram_send(chat_id, "⚠️ Укажите новое имя чата:\n`/rename Мой новый чат`", message_id)
+                self._send_ok()
+                return
+            new_title = parts[1].strip()[:30]
+            current_active = get_user_active_chat(user_id)
+            if rename_user_chat(user_id, current_active, new_title):
+                telegram_send(chat_id, f"✏️ Чат переименован в: *{escape_markdown(new_title)}*", message_id)
+            else:
+                telegram_send(chat_id, "❌ Не удалось переименовать чат.", message_id)
             self._send_ok()
             return
 
@@ -550,25 +615,24 @@ class handler(BaseHTTPRequestHandler):
             self._send_ok()
             return
 
-        # ГОЛОСОВЫЕ СООБЩЕНИЯ
+        # РАСПОЗНАВАНИЕ И ОБРАБОТКА ГОЛОСА
         if voice:
             try:
                 telegram_send(chat_id, "🎙 *Распознаю голос...*", message_id)
                 transcribed_text, used_voice_model = transcribe_voice(user_id, voice.get("file_id"))
                 safe_trans = escape_markdown(transcribed_text)
                 telegram_send(chat_id, f"🗣 *Расшифровка (`{used_voice_model}`):*\n_{safe_trans}_", message_id)
+                prompt = transcribed_text
             except Exception as e:
-                telegram_send(chat_id, f"❌ Ошибка распознавания: {e}", message_id)
+                telegram_send(chat_id, f"❌ Ошибка распознавания голоса: {e}", message_id)
                 self._send_ok()
                 return
-
-        if not text:
-            self._send_ok()
-            return
+        else:
+            prompt = None
 
         # МОДЕРАЦИЯ
         if text.startswith("/moderation"):
-            check_text = text[11:].strip()
+            check_text = raw_text[11:].strip()
             if not check_text:
                 telegram_send(chat_id, "Использование: `/moderation <текст>`", message_id)
                 self._send_ok()
@@ -578,40 +642,43 @@ class handler(BaseHTTPRequestHandler):
             self._send_ok()
             return
 
-        # ИЗВЛЕЧЕНИЕ ТЕКСТА ЗАПРОСА
-        prompt = None
+        # ИЗВЛЕЧЕНИЕ ТЕКСТА ЗАПРОСА (ЕСЛИ НЕ ГОЛОС)
+        if not prompt:
+            if chat_type == "private":
+                if text.startswith("/newchat"):
+                    parts = raw_text.split(maxsplit=1)
+                    if len(parts) > 1 and parts[1].strip():
+                        new_chat_name = parts[1].strip()[:30]
+                    else:
+                        new_chat_name = f"Новый чат {len(get_user_chats_list(user_id)) + 1}"
 
-        if chat_type == "private":
-            if text.startswith("/newchat"):
-                parts = text.split(maxsplit=1)
-                new_chat_name = parts[1].strip() if len(parts) > 1 and parts[1].strip() else f"chat_{len(get_user_chats_list(user_id)) + 1}"
-                if db:
-                    try:
-                        db.set(f"user:{user_id}:active_chat", new_chat_name)
-                        db.sadd(f"user:{user_id}:chats_list", new_chat_name)
-                    except Exception as e:
-                        print(f"DB error /newchat: {e}")
-                telegram_send(chat_id, f"✅ Создан и переключён чат: *{escape_markdown(new_chat_name)}*", message_id)
-                self._send_ok()
-                return
+                    if db:
+                        try:
+                            db.set(f"user:{user_id}:active_chat", new_chat_name)
+                            db.sadd(f"user:{user_id}:chats_list", new_chat_name)
+                        except Exception as e:
+                            print(f"DB error /newchat: {e}")
+                    telegram_send(chat_id, f"✅ Создан и выбран чат: *{escape_markdown(new_chat_name)}*", message_id)
+                    self._send_ok()
+                    return
 
-            prompt = text[5:].strip() if text.startswith("/ask ") else text
+                prompt = raw_text[5:].strip() if text.startswith("/ask") else raw_text
 
-        elif chat_type in ("group", "supergroup"):
-            is_reply_to_bot = False
-            reply_msg = message.get("reply_to_message")
-            if reply_msg and reply_msg.get("from", {}).get("is_bot"):
-                is_reply_to_bot = True
+            elif chat_type in ("group", "supergroup"):
+                is_reply_to_bot = False
+                reply_msg = message.get("reply_to_message")
+                if reply_msg and reply_msg.get("from", {}).get("is_bot"):
+                    is_reply_to_bot = True
 
-            bot_mentioned = BOT_USERNAME and f"@{BOT_USERNAME}" in raw_text.lower()
+                bot_mentioned = BOT_USERNAME and f"@{BOT_USERNAME}" in raw_text.lower()
 
-            if text.startswith("/ask "):
-                prompt = text[5:].strip()
-            elif bot_mentioned:
-                clean_txt = re.sub(f"@{BOT_USERNAME}", "", raw_text, flags=re.IGNORECASE).strip()
-                prompt = clean_txt
-            elif is_reply_to_bot:
-                prompt = raw_text.strip()
+                if text.startswith("/ask"):
+                    prompt = raw_text[5:].strip()
+                elif bot_mentioned:
+                    clean_txt = re.sub(f"@{BOT_USERNAME}", "", raw_text, flags=re.IGNORECASE).strip()
+                    prompt = clean_txt
+                elif is_reply_to_bot:
+                    prompt = raw_text.strip()
 
         if not prompt:
             self._send_ok()
@@ -620,7 +687,14 @@ class handler(BaseHTTPRequestHandler):
         active_chat = get_user_active_chat(user_id)
         history = get_chat_history(user_id, active_chat)
 
-        # ЗАПРОС К AI
+        # АВТОМАТИЧЕСКОЕ ИМЕНОВАНИЕ ЧАТА ЧЕРЕЗ AI ПРИ ПЕРВОМ СООБЩЕНИИ
+        if not history and active_chat.startswith("Новый чат"):
+            ai_title = generate_chat_title_ai(prompt)
+            if ai_title:
+                rename_user_chat(user_id, active_chat, ai_title)
+                active_chat = ai_title
+
+        # ЗАПРОС К AI (GROQ)
         try:
             answer, used_model, is_fallback = ask_groq_with_fallback(user_id, history, prompt)
         except Exception as e:
@@ -680,7 +754,7 @@ class handler(BaseHTTPRequestHandler):
 
         elif data == "action_new_chat":
             count = len(get_user_chats_list(user_id)) + 1
-            new_name = f"chat_{count}"
+            new_name = f"Новый чат {count}"
             if db:
                 try:
                     db.set(f"user:{user_id}:active_chat", new_name)
@@ -689,7 +763,12 @@ class handler(BaseHTTPRequestHandler):
                     print(f"DB Error action_new_chat: {e}")
             telegram_answer_callback(cb_id, f"Создан чат: {new_name}")
             kb = build_chats_menu_keyboard(user_id, page=1)
-            telegram_edit_message(chat_id, message_id, f"✅ Создан и выбран новый чат: *{escape_markdown(new_name)}*\n\nИли напишите `/newchat <имя>`, чтобы дать своё название.", reply_markup=kb)
+            msg_text = (
+                f"✅ Создан и выбран: *{escape_markdown(new_name)}*\n\n"
+                f"💡 При первом сообщении нейросеть автоматически переименует его по смыслу темы.\n"
+                f"Или укажите своё имя через команду: `/newchat Имя`"
+            )
+            telegram_edit_message(chat_id, message_id, msg_text, reply_markup=kb)
 
         elif data.startswith("confirm_del_"):
             target_chat = data[12:]
