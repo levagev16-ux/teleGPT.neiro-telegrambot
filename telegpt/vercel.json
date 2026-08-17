@@ -1,16 +1,16 @@
 {
-  "routes": [
+  "rewrites": [
     {
-      "src": "/api/app/(.*)",
-      "dest": "/api/app.py"
+      "source": "/api/app/:path*",
+      "destination": "/api/app.py"
     },
     {
-      "src": "/api/bot",
-      "dest": "/api/index.py"
+      "source": "/api/bot",
+      "destination": "/api/index.py"
     },
     {
-      "src": "/(.*)",
-      "dest": "/public/$1"
+      "source": "/(.*)",
+      "destination": "/public/$1"
     }
   ]
 }
