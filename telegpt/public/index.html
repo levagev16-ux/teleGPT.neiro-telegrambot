@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>LevaGPT</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body {
+      background-color: var(--tg-theme-bg-color, #ffffff);
+      color: var(--tg-theme-text-color, #000000);
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+    }
+    .header-bg {
+      background-color: var(--tg-theme-secondary-bg-color, #f4f4f5);
+      border-bottom: 1px solid var(--tg-theme-hint-color, #e4e4e7);
+    }
+    .input-bg {
+      background-color: var(--tg-theme-secondary-bg-color, #f4f4f5);
+      border-top: 1px solid var(--tg-theme-hint-color, #e4e4e7);
+    }
+    .bubble-user {
+      background-color: var(--tg-theme-button-color, #3390ec);
+      color: var(--tg-theme-button-text-color, #ffffff);
+      border-bottom-right-radius: 4px;
+    }
+    .bubble-bot {
+      background-color: var(--tg-theme-secondary-bg-color, #f4f4f5);
+      color: var(--tg-theme-text-color, #000000);
+      border-bottom-left-radius: 4px;
+    }
+    .btn-primary {
+      background-color: var(--tg-theme-button-color, #3390ec);
+      color: var(--tg-theme-button-text-color, #ffffff);
+    }
+    select, input, textarea {
+      background-color: var(--tg-theme-bg-color, #ffffff);
+      color: var(--tg-theme-text-color, #000000);
+      border: 1px solid var(--tg-theme-hint-color, #d4d4d8);
+    }
+    .mic-active {
+      animation: pulse-mic 1.2s infinite;
+      color: #ef4444 !important;
+    }
+    @keyframes pulse-mic {
+      0% { transform: scale(1); }
+      50% { transform: scale(1.15); }
+      100% { transform: scale(1); }
+    }
+  </style>
+</head>
+<body class="h-screen flex flex-col overflow-hidden antialiased select-none">
+
+  <!-- ШАПКА -->
+  <header class="header-bg h-14 px-4 flex items-center justify-between shrink-0 z-20">
+    <div>
+      <h1 id="current-chat-title" class="font-bold text-base truncate max-w-[180px]">Основной чат</h1>
+      <span class="text-[11px] opacity-70" id="status-text">Онлайн</span>
+    </div>
+    
+    <button id="btn-toggle-menu" class="p-2 opacity-80 hover:opacity-100 active:scale-95 transition">
+      <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"></path></svg>
+    </button>
+  </header>
+
+  <!-- МЕНЮ ЧАТОВ -->
+  <div id="chats-dropdown" class="hidden absolute top-14 right-0 w-64 header-bg shadow-xl z-30 border-l border-b rounded-bl-xl flex flex-col max-h-[60vh]">
+    <button id="btn-create-chat" class="m-2 py-2 btn-primary rounded-lg font-medium text-sm transition active:scale-95">
+      + Новый чат
+    </button>
+    <div id="chats-list-container" class="overflow-y-auto p-2 space-y-1"></div>
+  </div>
+
+  <!-- ОКНО ЧАТА -->
+  <main id="chat-messages" class="flex-1 overflow-y-auto p-4 space-y-3">
+    <div class="flex flex-col items-center justify-center h-full opacity-50 space-y-2">
+      <p class="text-sm">Загрузка...</p>
+    </div>
+  </main>
+
+  <!-- ИНДИКАТОР ВВОДА -->
+  <div id="typing-indicator" class="hidden px-4 pb-2 text-xs opacity-60 flex items-center gap-2 shrink-0">
+    <span class="animate-pulse font-bold">● ● ●</span>
+    <span>Нейросеть отвечает...</span>
+  </div>
+
+  <!-- ВВОД СООБЩЕНИЯ -->
+  <footer class="input-bg p-2 shrink-0">
+    <div class="mb-2 px-1">
+      <select id="model-select" class="w-full text-xs rounded-lg px-2 py-1.5 focus:outline-none appearance-none">
+        <option value="llama-3.3-70b-versatile">llama-3.3-70b-versatile</option>
+      </select>
+    </div>
+
+    <div class="flex items-end gap-2">
+      <button id="btn-voice" class="p-2.5 opacity-70 hover:opacity-100 transition shrink-0 rounded-full bg-[var(--tg-theme-bg-color)]">
+        🎙️
+      </button>
+
+      <textarea id="message-input" rows="1" placeholder="Сообщение..." class="flex-1 resize-none rounded-2xl px-4 py-2.5 text-sm focus:outline-none" style="min-height: 40px; max-height: 120px;"></textarea>
+
+      <button id="btn-send" class="p-2.5 btn-primary rounded-full shrink-0 transition active:scale-95">
+        <svg class="w-5 h-5 ml-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"></path></svg>
+      </button>
+    </div>
+  </footer>
+
+  <script>
+    const tg = window.Telegram?.WebApp;
+    if (tg) { tg.expand(); tg.ready(); }
+
+    const userId = tg?.initDataUnsafe?.user?.id || "browser_user_123";
+    let activeChat = "Основной чат";
+    let allChats = [];
+
+    const els = {
+      dropdown: document.getElementById("chats-dropdown"),
+      chatsList: document.getElementById("chats-list-container"),
+      messages: document.getElementById("chat-messages"),
+      input: document.getElementById("message-input"),
+      typing: document.getElementById("typing-indicator"),
+      btnVoice: document.getElementById("btn-voice"),
+      title: document.getElementById("current-chat-title"),
+      status: document.getElementById("status-text"),
+      models: document.getElementById("model-select")
+    };
+
+    const DEFAULT_MODELS = [
+      "llama-3.3-70b-versatile",
+      "llama-3.1-8b-instant",
+      "deepseek-r1-distill-llama-70b",
+      "llama-3.2-11b-vision-preview",
+      "llama-3.2-90b-vision-preview",
+      "mixtral-8x7b-32768",
+      "gemma2-9b-it"
+    ];
+
+    els.input.addEventListener('input', function() {
+      this.style.height = 'auto';
+      this.style.height = (this.scrollHeight) + 'px';
+    });
+
+    document.getElementById("btn-toggle-menu").onclick = (e) => {
+      e.stopPropagation();
+      els.dropdown.classList.toggle("hidden");
+    };
+    document.addEventListener("click", () => els.dropdown.classList.add("hidden"));
+
+    function renderModels(models) {
+      const selected = els.models.value;
+      els.models.innerHTML = models.map(m => `<option value="${m}">${m}</option>`).join('');
+      if (models.includes(selected)) {
+        els.models.value = selected;
+      }
+    }
+
+    async function autoLoadModels() {
+      const cached = localStorage.getItem('groq_models_cache');
+      if (cached) {
+        try { renderModels(JSON.parse(cached)); } 
+        catch (e) { renderModels(DEFAULT_MODELS); }
+      } else {
+        renderModels(DEFAULT_MODELS);
+      }
+
+      try {
+        const res = await fetch('/api/app/models');
+        const data = await res.json();
+        if (data.models && data.models.length > 0) {
+          localStorage.setItem('groq_models_cache', JSON.stringify(data.models));
+          renderModels(data.models);
+        }
+      } catch (err) {
+        console.warn("Использован локальный список моделей");
+      }
+    }
+
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    let isListening = false;
+    if (SpeechRecognition) {
+      const rec = new SpeechRecognition();
+      rec.lang = 'ru-RU';
+
+      els.btnVoice.onclick = () => {
+        if (!isListening) {
+          rec.start();
+          els.btnVoice.classList.add('mic-active');
+          isListening = true;
+        } else {
+          rec.stop();
+        }
+      };
+
+      rec.onresult = (e) => {
+        els.input.value = (els.input.value + " " + e.results[0][0].transcript).trim();
+        resetMic();
+      };
+      rec.onerror = resetMic;
+      rec.onend = resetMic;
+    } else {
+      els.btnVoice.onclick = () => alert("Голосовой ввод не поддерживается браузером.");
+    }
+
+    function resetMic() {
+      els.btnVoice.classList.remove('mic-active');
+      isListening = false;
+    }
+
+    async function loadChats() {
+      try {
+        const res = await fetch(`/api/app/chats?user_id=${userId}`);
+        const data = await res.json();
+        allChats = data.chats?.length ? data.chats : ["Основной чат"];
+        activeChat = data.active || allChats[0];
+        els.title.innerText = activeChat;
+        renderChats(allChats);
+        await loadHistory();
+      } catch (err) {
+        appendMessage('bot', '⚠️ Ошибка подключения к серверу API.');
+      }
+    }
+
+    function renderChats(chats) {
+      els.chatsList.innerHTML = chats.map(chat => `
+        <div class="flex items-center justify-between p-2 rounded-lg text-sm ${chat === activeChat ? 'bg-[var(--tg-theme-button-color)] text-[var(--tg-theme-button-text-color)]' : 'hover:bg-black/5'} cursor-pointer">
+          <span class="truncate flex-1" onclick="switchChat('${chat}')">${chat}</span>
+          <button onclick="deleteChat('${chat}')" class="px-2 opacity-60 hover:opacity-100 text-red-500">×</button>
+        </div>
+      `).join("");
+    }
+
+    async function switchChat(chat) {
+      activeChat = chat;
+      els.dropdown.classList.add("hidden");
+      els.title.innerText = chat;
+      await fetch('/api/app/chats/switch', { method: 'POST', body: JSON.stringify({ user_id: userId, chat_name: chat }) });
+      await loadHistory();
+      renderChats(allChats);
+    }
+
+    async function deleteChat(chat) {
+      if (!confirm(`Удалить "${chat}"?`)) return;
+      await fetch('/api/app/chats/delete', { method: 'POST', body: JSON.stringify({ user_id: userId, chat_name: chat }) });
+      loadChats();
+    }
+
+    document.getElementById("btn-create-chat").onclick = async () => {
+      const name = prompt("Название нового чата:", `Чат ${allChats.length + 1}`);
+      if (!name) return;
+      await fetch('/api/app/chats/create', { method: 'POST', body: JSON.stringify({ user_id: userId, chat_name: name }) });
+      els.dropdown.classList.add("hidden");
+      loadChats();
+    };
+
+    async function loadHistory() {
+      els.messages.innerHTML = "";
+      try {
+        const res = await fetch(`/api/app/history?user_id=${userId}&chat_name=${encodeURIComponent(activeChat)}`);
+        const data = await res.json();
+        if (data.history?.length) {
+          data.history.forEach(m => appendMessage(m.role === 'user' ? 'user' : 'bot', m.content));
+        } else {
+          els.messages.innerHTML = `<div class="flex items-center justify-center h-full opacity-50 text-sm">Чат пуст. Напишите сообщение!</div>`;
+        }
+      } catch (err) {}
+    }
+
+    function appendMessage(sender, text) {
+      if (els.messages.querySelector('.opacity-50')) els.messages.innerHTML = "";
+      const div = document.createElement("div");
+      div.className = sender === 'user' ? "flex justify-end" : "flex justify-start";
+      div.innerHTML = `<div class="${sender === 'user' ? 'bubble-user' : 'bubble-bot'} px-4 py-2 rounded-2xl max-w-[85%] text-[15px] leading-relaxed shadow-sm break-words">${text.replace(/\n/g, '<br>')}</div>`;
+      els.messages.appendChild(div);
+      els.messages.scrollTop = els.messages.scrollHeight;
+    }
+
+    async function sendMessage() {
+      const text = els.input.value.trim();
+      if (!text) return;
+
+      appendMessage('user', text);
+      els.input.value = "";
+      els.input.style.height = 'auto';
+      els.typing.classList.remove("hidden");
+
+      try {
+        const res = await fetch('/api/app/message', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ user_id: userId, chat_name: activeChat, prompt: text, model: els.models.value })
+        });
+        
+        const data = await res.json();
+        els.typing.classList.add("hidden");
+
+        if (data.answer) {
+          appendMessage('bot', data.answer);
+        } else {
+          appendMessage('bot', `⚠️ Ошибка: ${data.error || 'Нет ответа'}`);
+        }
+      } catch (err) {
+        els.typing.classList.add("hidden");
+        appendMessage('bot', '⚠️ Ошибка запроса к серверу.');
+      }
+    }
+
+    document.getElementById("btn-send").onclick = sendMessage;
+    els.input.onkeydown = (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        sendMessage();
+      }
+    };
+
+    autoLoadModels();
+    loadChats();
+  </script>
+</body>
+  </html>
+  
