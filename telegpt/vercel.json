@@ -1,0 +1,16 @@
+{
+  "routes": [
+    {
+      "src": "/api/app/(.*)",
+      "dest": "/api/app.py"
+    },
+    {
+      "src": "/api/bot",
+      "dest": "/api/index.py"
+    },
+    {
+      "src": "/(.*)",
+      "dest": "/public/$1"
+    }
+  ]
+}
