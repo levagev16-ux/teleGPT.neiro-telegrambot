@@ -484,16 +484,49 @@ def ask_groq_with_fallback(user_id, history, prompt):
 
     models_to_try = [selected_model] if selected_model != "auto" else text_models
 
+    # Максимальный примерный размер истории.
+    # Оставляем запас для системного промпта и нового сообщения.
+    MAX_HISTORY_CHARS = 18000
+
+    # Оставляем только самые свежие сообщения,
+    # пока они помещаются в установленный лимит.
+    limited_history = []
+    total_chars = 0
+
+    for msg in reversed(history):
+        content = str(msg.get("content", ""))
+
+        if total_chars + len(content) > MAX_HISTORY_CHARS:
+            break
+
+        limited_history.insert(0, {
+            "role": msg.get("role", "user"),
+            "content": content
+        })
+
+        total_chars += len(content)
+
     last_error = None
+
     for model_name in models_to_try:
         try:
             system_instruction = get_system_prompt_for_model(model_name)
-            messages = [{"role": "system", "content": system_instruction}]
 
-            for msg in history:
-                messages.append({"role": msg["role"], "content": msg["content"]})
+            messages = [
+                {
+                    "role": "system",
+                    "content": system_instruction
+                }
+            ]
 
-            messages.append({"role": "user", "content": prompt})
+            # Добавляем ограниченную историю
+            messages.extend(limited_history)
+
+            # Добавляем текущий запрос
+            messages.append({
+                "role": "user",
+                "content": str(prompt)
+            })
 
             response = groq.chat.completions.create(
                 model=model_name,
@@ -502,11 +535,18 @@ def ask_groq_with_fallback(user_id, history, prompt):
             )
 
             answer = response.choices[0].message.content
+
             if answer:
-                is_fallback = (selected_model == "auto" and model_name != text_models[0])
+                is_fallback = (
+                    selected_model == "auto"
+                    and model_name != text_models[0]
+                )
+
                 return answer, model_name, is_fallback
+
         except Exception as e:
             last_error = e
+            print(f"Ошибка модели {model_name}: {e}")
             continue
 
     raise Exception(f"Все модели недоступны. Ошибка: {last_error}")
