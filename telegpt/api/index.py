@@ -204,7 +204,8 @@ def get_chat_history(user_id, chat_name):
 def save_chat_history(user_id, chat_name, history):
     if db:
         try:
-            db.set(f"user:{user_id}:chat:{chat_name}", json.dumps(history[-10:]))
+            # Сохраняем максимум 15 сообщений, но обрезка по символам будет происходить перед отправкой
+            db.set(f"user:{user_id}:chat:{chat_name}", json.dumps(history[-15:]))
         except Exception as e:
             print(f"DB Error (save_chat_history): {e}")
 
@@ -382,13 +383,26 @@ def build_category_keyboard(user_id, category_type):
 
 # ---- AI LOGIC & SYSTEM PROMPTS ----
 
+def truncate_history_by_length(history, max_chars=10000):
+    """Обрезает историю сообщений с конца, чтобы суммарный объем не превышал допустимый лимит."""
+    result = []
+    total_len = 0
+    for msg in reversed(history):
+        content_len = len(msg.get("content", ""))
+        if total_len + content_len > max_chars:
+            break
+        result.append(msg)
+        total_len += content_len
+    return list(reversed(result))
+
+
 def generate_chat_title_ai(first_message):
     try:
         if not groq:
             return None
         prompt = (
             f"Придумай очень короткое название (2-4 слова) на русском языке для диалога, который начинается с этого сообщения: "
-            f"\"{first_message}\". Ответь ТОЛЬКО названием, без кавычек и лишних слов."
+            f"\"{first_message[:200]}\". Ответь ТОЛЬКО названием, без кавычек и лишних слов."
         )
         res = groq.chat.completions.create(
             model="llama-3.1-8b-instant",
@@ -403,25 +417,7 @@ def generate_chat_title_ai(first_message):
 
 
 def get_system_prompt_for_model(model_name):
-    m_lower = model_name.lower()
-
-    if "gemma" in m_lower:
-        name, creator = "Gemma", "Google"
-    elif "llama" in m_lower:
-        name, creator = "Llama", "Meta"
-    elif "qwen" in m_lower:
-        name, creator = "Qwen", "Alibaba"
-    elif "gpt" in m_lower:
-        name, creator = "GPT", "OpenAI"
-    elif "mixtral" in m_lower or "mistral" in m_lower:
-        name, creator = "Mistral", "Mistral AI"
-    else:
-        name, creator = model_name, "Groq"
-
-    return (
-        f"Ты — полезный ассистент {name}, работающий через Groq API ({creator}). "
-        f"Отвечай пользователю прямо, грамотно и точно по сути его вопроса."
-    )
+    return "Ты — универсальный AI-ассистент. Отвечай пользователю прямо, грамотно и точно по сути его запроса."
 
 
 def transcribe_voice(user_id, file_id):
@@ -484,49 +480,19 @@ def ask_groq_with_fallback(user_id, history, prompt):
 
     models_to_try = [selected_model] if selected_model != "auto" else text_models
 
-    # Максимальный примерный размер истории.
-    # Оставляем запас для системного промпта и нового сообщения.
-    MAX_HISTORY_CHARS = 18000
-
-    # Оставляем только самые свежие сообщения,
-    # пока они помещаются в установленный лимит.
-    limited_history = []
-    total_chars = 0
-
-    for msg in reversed(history):
-        content = str(msg.get("content", ""))
-
-        if total_chars + len(content) > MAX_HISTORY_CHARS:
-            break
-
-        limited_history.insert(0, {
-            "role": msg.get("role", "user"),
-            "content": content
-        })
-
-        total_chars += len(content)
+    # Динамически обрезаем историю, чтобы избежать переполнения токенов (до ~10k символов)
+    safe_history = truncate_history_by_length(history, max_chars=10000)
 
     last_error = None
-
     for model_name in models_to_try:
         try:
             system_instruction = get_system_prompt_for_model(model_name)
+            messages = [{"role": "system", "content": system_instruction}]
 
-            messages = [
-                {
-                    "role": "system",
-                    "content": system_instruction
-                }
-            ]
+            for msg in safe_history:
+                messages.append({"role": msg["role"], "content": msg["content"]})
 
-            # Добавляем ограниченную историю
-            messages.extend(limited_history)
-
-            # Добавляем текущий запрос
-            messages.append({
-                "role": "user",
-                "content": str(prompt)
-            })
+            messages.append({"role": "user", "content": prompt})
 
             response = groq.chat.completions.create(
                 model=model_name,
@@ -535,18 +501,30 @@ def ask_groq_with_fallback(user_id, history, prompt):
             )
 
             answer = response.choices[0].message.content
-
             if answer:
-                is_fallback = (
-                    selected_model == "auto"
-                    and model_name != text_models[0]
-                )
-
+                is_fallback = (selected_model == "auto" and model_name != text_models[0])
                 return answer, model_name, is_fallback
-
         except Exception as e:
             last_error = e
-            print(f"Ошибка модели {model_name}: {e}")
+            err_str = str(e)
+            
+            # Если превышен лимит токенов (ошибка 413 / Request too large), пытаемся отправить без истории
+            if ("413" in err_str or "requesttoolarge" in err_str.lower() or "ratelimitexceeded" in err_str.lower()) and len(safe_history) > 0:
+                try:
+                    fallback_messages = [
+                        {"role": "system", "content": system_instruction},
+                        {"role": "user", "content": prompt}
+                    ]
+                    response = groq.chat.completions.create(
+                        model="llama-3.1-8b-instant",
+                        messages=fallback_messages,
+                        max_completion_tokens=2048
+                    )
+                    answer = response.choices[0].message.content
+                    if answer:
+                        return answer, "llama-3.1-8b-instant", True
+                except Exception:
+                    pass
             continue
 
     raise Exception(f"Все модели недоступны. Ошибка: {last_error}")
@@ -978,3 +956,4 @@ class handler(BaseHTTPRequestHandler):
         self.send_header('Content-type', 'application/json')
         self.end_headers()
         self.wfile.write(json.dumps({"ok": True}).encode('utf-8'))
+            
