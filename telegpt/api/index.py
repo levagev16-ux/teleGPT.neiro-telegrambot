@@ -26,6 +26,19 @@ except Exception:
     BOT_USERNAME = "neirogpt234_bot"
 
 
+# ---- REGEX & HELPERS FOR MODEL QUERY CHECK ----
+
+MODEL_QUERY_PATTERN = re.compile(
+    r"(каку[юя]|какая|какой|какие|что\s+за)\s+(модель|модели|моделю|версию|версия|нейросеть|нейронка|ии|gpt)",
+    re.IGNORECASE
+)
+
+def is_model_query(text):
+    if not text:
+        return False
+    return bool(MODEL_QUERY_PATTERN.search(text))
+
+
 # ---- TELEGRAM API & TEXT HELPERS ----
 
 def escape_markdown(text):
@@ -115,7 +128,6 @@ def get_categorized_models():
     voice_models = [m for m in all_models if "whisper" in m]
     mod_models = [m for m in all_models if any(x in m for x in ["safeguard", "prompt-guard"])]
 
-    # Сортируем так, чтобы Llama стояла в приоритете во избежание захвата имён другими моделями
     text_models.sort(key=lambda x: 0 if "llama-3.3" in x else (1 if "llama" in x else 2))
 
     if not text_models:
@@ -386,7 +398,6 @@ def build_category_keyboard(user_id, category_type):
 # ---- AI LOGIC & SYSTEM PROMPTS ----
 
 def truncate_history_by_length(history, max_chars=10000):
-    """Обрезает историю сообщений, чтобы суммарный объем не превышал допустимый лимит."""
     result = []
     total_len = 0
     for msg in reversed(history):
@@ -757,6 +768,19 @@ class handler(BaseHTTPRequestHandler):
             return
 
         set_user_setting(user_id, "awaiting_state", "none")
+
+        # ---- ПРОВЕРКА ВОПРОСА О МОДЕЛИ (ОТ СЕКАЕТ НЕЙРОСЕТЬ) ----
+        if is_model_query(prompt):
+            selected_model = get_user_setting(user_id, "model_text", "auto")
+            if selected_model == "auto":
+                text_models, _, _ = get_categorized_models()
+                selected_model = text_models[0] if text_models else "llama-3.3-70b-versatile"
+
+            reply_text = f"Я использую модель `{selected_model}`. Чем могу помочь?"
+            telegram_send(chat_id, reply_text, message_id)
+            self._send_ok()
+            return
+
         active_chat = get_user_active_chat(user_id)
         history = get_chat_history(user_id, active_chat)
 
@@ -969,4 +993,4 @@ class handler(BaseHTTPRequestHandler):
         self.send_header('Content-type', 'application/json')
         self.end_headers()
         self.wfile.write(json.dumps({"ok": True}).encode('utf-8'))
-            
+        
