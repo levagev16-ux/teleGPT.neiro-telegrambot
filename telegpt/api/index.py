@@ -26,19 +26,6 @@ except Exception:
     BOT_USERNAME = "neirogpt234_bot"
 
 
-# ---- REGEX & HELPERS FOR MODEL QUERY CHECK ----
-
-MODEL_QUERY_PATTERN = re.compile(
-    r"(каку[юя]|какая|какой|какие|что\s+за)\s+(модель|модели|моделю|версию|версия|нейросеть|нейронка|ии|gpt)",
-    re.IGNORECASE
-)
-
-def is_model_query(text):
-    if not text:
-        return False
-    return bool(MODEL_QUERY_PATTERN.search(text))
-
-
 # ---- TELEGRAM API & TEXT HELPERS ----
 
 def escape_markdown(text):
@@ -430,20 +417,12 @@ def generate_chat_title_ai(first_message):
 
 
 def get_system_prompt_for_model(model_name):
-    m_lower = model_name.lower()
-
-    if "qwen" in m_lower:
-        return "Ты — полезный ИИ-ассистент Qwen. Отвечай прямо, грамотно и точно."
-    elif "gemma" in m_lower:
-        return "Ты — полезный ИИ-ассистент Gemma от Google. Отвечай прямо, грамотно и точно."
-    elif "llama" in m_lower:
-        return "Ты — полезный ИИ-ассистент Llama от Meta. Отвечай прямо, грамотно и точно."
-    elif "gpt" in m_lower:
-        return "Ты — полезный ИИ-ассистент GPT. Отвечай прямо, грамотно и точно."
-    elif "mixtral" in m_lower or "mistral" in m_lower:
-        return "Ты — полезный ИИ-ассистент Mistral. Отвечай прямо, грамотно и точно."
-    
-    return "Ты — полезный универсальный ИИ-ассистент. Отвечай прямо, грамотно и точно."
+    return (
+        f"Ты — полезный ИИ-ассистент. "
+        f"Запомни: твоя текущая модель — {model_name}. "
+        f"Если тебя спрашивают, на какой модели ты работаешь или используешь ли ты другую модель, "
+        f"отвечай, что используешь именно {model_name}."
+    )
 
 
 def transcribe_voice(user_id, file_id):
@@ -769,18 +748,6 @@ class handler(BaseHTTPRequestHandler):
 
         set_user_setting(user_id, "awaiting_state", "none")
 
-        # ---- ПРОВЕРКА ВОПРОСА О МОДЕЛИ (ОТ СЕКАЕТ НЕЙРОСЕТЬ) ----
-        if is_model_query(prompt):
-            selected_model = get_user_setting(user_id, "model_text", "auto")
-            if selected_model == "auto":
-                text_models, _, _ = get_categorized_models()
-                selected_model = text_models[0] if text_models else "llama-3.3-70b-versatile"
-
-            reply_text = f"Я использую модель `{selected_model}`. Чем могу помочь?"
-            telegram_send(chat_id, reply_text, message_id)
-            self._send_ok()
-            return
-
         active_chat = get_user_active_chat(user_id)
         history = get_chat_history(user_id, active_chat)
 
@@ -993,4 +960,3 @@ class handler(BaseHTTPRequestHandler):
         self.send_header('Content-type', 'application/json')
         self.end_headers()
         self.wfile.write(json.dumps({"ok": True}).encode('utf-8'))
-        
