@@ -115,6 +115,9 @@ def get_categorized_models():
     voice_models = [m for m in all_models if "whisper" in m]
     mod_models = [m for m in all_models if any(x in m for x in ["safeguard", "prompt-guard"])]
 
+    # Сортируем так, чтобы Llama стояла в приоритете во избежание захвата имён другими моделями
+    text_models.sort(key=lambda x: 0 if "llama-3.3" in x else (1 if "llama" in x else 2))
+
     if not text_models:
         text_models = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
     if not voice_models:
@@ -204,7 +207,6 @@ def get_chat_history(user_id, chat_name):
 def save_chat_history(user_id, chat_name, history):
     if db:
         try:
-            # Сохраняем максимум 15 сообщений, но обрезка по символам будет происходить перед отправкой
             db.set(f"user:{user_id}:chat:{chat_name}", json.dumps(history[-15:]))
         except Exception as e:
             print(f"DB Error (save_chat_history): {e}")
@@ -384,7 +386,7 @@ def build_category_keyboard(user_id, category_type):
 # ---- AI LOGIC & SYSTEM PROMPTS ----
 
 def truncate_history_by_length(history, max_chars=10000):
-    """Обрезает историю сообщений с конца, чтобы суммарный объем не превышал допустимый лимит."""
+    """Обрезает историю сообщений, чтобы суммарный объем не превышал допустимый лимит."""
     result = []
     total_len = 0
     for msg in reversed(history):
@@ -417,7 +419,20 @@ def generate_chat_title_ai(first_message):
 
 
 def get_system_prompt_for_model(model_name):
-    return "Ты — универсальный AI-ассистент. Отвечай пользователю прямо, грамотно и точно по сути его запроса."
+    m_lower = model_name.lower()
+
+    if "qwen" in m_lower:
+        return "Ты — полезный ИИ-ассистент Qwen. Отвечай прямо, грамотно и точно."
+    elif "gemma" in m_lower:
+        return "Ты — полезный ИИ-ассистент Gemma от Google. Отвечай прямо, грамотно и точно."
+    elif "llama" in m_lower:
+        return "Ты — полезный ИИ-ассистент Llama от Meta. Отвечай прямо, грамотно и точно."
+    elif "gpt" in m_lower:
+        return "Ты — полезный ИИ-ассистент GPT. Отвечай прямо, грамотно и точно."
+    elif "mixtral" in m_lower or "mistral" in m_lower:
+        return "Ты — полезный ИИ-ассистент Mistral. Отвечай прямо, грамотно и точно."
+    
+    return "Ты — полезный универсальный ИИ-ассистент. Отвечай прямо, грамотно и точно."
 
 
 def transcribe_voice(user_id, file_id):
@@ -480,7 +495,6 @@ def ask_groq_with_fallback(user_id, history, prompt):
 
     models_to_try = [selected_model] if selected_model != "auto" else text_models
 
-    # Динамически обрезаем историю, чтобы избежать переполнения токенов (до ~10k символов)
     safe_history = truncate_history_by_length(history, max_chars=10000)
 
     last_error = None
@@ -508,7 +522,6 @@ def ask_groq_with_fallback(user_id, history, prompt):
             last_error = e
             err_str = str(e)
             
-            # Если превышен лимит токенов (ошибка 413 / Request too large), пытаемся отправить без истории
             if ("413" in err_str or "requesttoolarge" in err_str.lower() or "ratelimitexceeded" in err_str.lower()) and len(safe_history) > 0:
                 try:
                     fallback_messages = [
